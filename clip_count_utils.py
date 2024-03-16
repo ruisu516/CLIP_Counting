@@ -1,9 +1,10 @@
-import torch
+import torch, spacy
 import numpy as np
 from PIL import Image
 import requests
 from tqdm import tqdm
 from requests.exceptions import Timeout
+
 spacy_nlp = spacy.load("en_core_web_sm")
 
 OBJ_NAMES = {
@@ -11,6 +12,7 @@ OBJ_NAMES = {
     'lions':"lions", 
     'chairs':"chairs", 
     'laptops':"laptops",
+    'cats':"cats", 
     'home_cat':"cats", 
     'outside_cats':"cats", 
     'cartoon_cats':"cats",
@@ -29,6 +31,17 @@ NUMBER_WORDS = [
     'ten'
 ]
 SUB_NUMBER_RANGE=[2,3,4,5]
+
+def generate_random_vectors(shape, seed,N=10):
+    torch.manual_seed(seed)
+    vectors = []
+    
+    for _ in range(N):
+        vec = torch.randn(*shape)
+        vectors.append(vec)
+        
+    concatenated_vectors = torch.stack(vectors)
+    return concatenated_vectors
 
 def project_tensor_B_onto_A(A, B):
 
@@ -125,13 +138,25 @@ def get_logits(model,text_embeds,image_embeds):
     return logits_per_text,logits_per_image
 
 
-def run_on_my_data_img_retrievel(model,processor,target_data,target,ref,normalize,device,factor,sample_size=10,num_classes=4,linear_shift=True,start_with_target_with_num=False,normalize_before_scoring=False):
-    ref_aug_sentences=[f"{word} {OBJ_NAMES[ref]}" for word in NUMBER_WORDS[:num_classes]]
+def run_on_my_data_img_retrievel(
+        model,
+        processor,
+        target_data,
+        target,
+        ref,
+        normalize,
+        device,
+        factor,
+        linear_shift=True,
+        start_with_target_with_num=True,
+        normalize_before_scoring=False
+):
+    ref_aug_sentences=[f"{word} {ref}" for word in NUMBER_WORDS[:num_classes]]
     target_aug_sentences=[f"{word} {OBJ_NAMES[target]}" for word in NUMBER_WORDS[:num_classes]]
 
     ref_diff,ref_prompt_single=get_ref_difference(
         ref_aug_sentences=ref_aug_sentences,
-        ref_object=[OBJ_NAMES[ref]],
+        ref_object=[ref],
         model=model,
         processor=processor,
         device=device,
@@ -161,7 +186,7 @@ def run_on_my_data_img_retrievel(model,processor,target_data,target,ref,normaliz
         for number in range(2,num_classes+2):
             
             # print(merged_text_embeds_.size())
-            selected_data = target_data[number][:sample_size]
+            selected_data = target_data[number]
             for sample in selected_data:
                 pixel_values=processor(text=None, images=sample["img"], return_tensors="pt", padding=True)["pixel_values"] # torch.Size([1, 3, 224, 224])
                 image_embeds = get_image_embeds(
@@ -173,23 +198,55 @@ def run_on_my_data_img_retrievel(model,processor,target_data,target,ref,normaliz
                 all_logits_per_text.append(logits_per_text.item())
             torch.cuda.empty_cache()
 
-        all_probs_per_class.append(torch.nn.functional.softmax(torch.tensor(all_logits_per_text).float(),dim=0).reshape(num_classes,sample_size).sum(dim=1).numpy().tolist())
+        all_probs_per_class.append(torch.nn.functional.softmax(torch.tensor(all_logits_per_text).float(),dim=0).reshape(num_classes,-1).sum(dim=1).numpy().tolist())
     
     return all_probs_per_class
 
-def run_on_my_data_clf(model,processor,target_data,target,ref,normalize,device,sample_size,num_classes=4,linear_shift=True,start_with_target_with_num=False):
-    ref_aug_sentences=[f"{word} {OBJ_NAMES[ref]}" for word in NUMBER_WORDS[:num_classes]]
-    target_aug_sentences=[f"{word} {OBJ_NAMES[target]}" for word in NUMBER_WORDS[:num_classes]]
+def get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes):
+    ref_aug_sentences=[f"{word} {ref}" for word in NUMBER_WORDS[:num_classes]]
 
     ref_diff,ref_prompt_single=get_ref_difference(
         ref_aug_sentences=ref_aug_sentences,
-        ref_object=[OBJ_NAMES[ref]],
+        ref_object=[ref],
         model=model,
         processor=processor,
         device=device,
         normalize=normalize
     )
+    
+    ref_diff_projection = (torch.mm(ref_diff, ref_prompt_single.t()) / torch.mm(ref_prompt_single, ref_prompt_single.t()).squeeze()) * ref_prompt_single
+    ref_diff_projection_2 = (torch.mm(ref_diff-ref_diff_projection, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
+    ref_diff = ref_diff - ref_diff_projection - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+    
+    return ref_diff
+
+def get_ref_diff_multi_objs(model,processor,target_text_sample,device,normalize,num_classes,ref_objs):
+    ref_diff = 0
+    for ref in ref_objs:
+        ref_diff += get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes)
+    ref_diff /= len(ref_objs)
+    return ref_diff
+
+def run_on_my_data_clf(
+        model,
+        processor,
+        target_data,
+        target,
+        ref,
+        factor=1,
+        normalize=False,
+        device='gpu',
+        num_classes=4,
+        linear_shift=True,
+        start_with_target_with_num=True,
+        use_only_number_word=False,
+        normalize_number_word=None,
+        use_random_vector=False,
+        random_seed=None,
+        use_muti_objs=False,
+):
     target_text_sample={}
+    target_aug_sentences=[f"{word} {OBJ_NAMES[target]}" for word in NUMBER_WORDS[:num_classes]]
     target_text_sample["target_obj_embeds"],target_text_sample["target_obj_aug_embeds"]=get_target_rep(
         target_object=[OBJ_NAMES[target]],
         target_aug_sentences=target_aug_sentences,
@@ -198,24 +255,40 @@ def run_on_my_data_clf(model,processor,target_data,target,ref,normalize,device,s
         device=device,
         normalize=normalize
     )
+    # print("target_text_sample['target_obj_embeds'].shape,",target_text_sample["target_obj_embeds"].shape,)
+    if use_random_vector:
+        print("use_random_vector")
+        ref_diff_obj = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes)
+        torch.manual_seed(random_seed)
+        ref_diff = torch.randn(*ref_diff_obj.shape).to(device)
+        ref_diff_projection_2 = (torch.mm(ref_diff, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
+        ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+        ref_diff = ref_diff * ref_diff_obj.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
 
-    ref_diff_projection = (torch.mm(ref_diff, ref_prompt_single.t()) / torch.mm(ref_prompt_single, ref_prompt_single.t()).squeeze()) * ref_prompt_single
-    ref_diff_projection_2 = (torch.mm(ref_diff-ref_diff_projection, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
-    # ref_diff_projection_2 = (torch.sum(ref_diff-ref_diff_projection * target_text_sample["target_obj_aug_embeds"], dim=1, keepdim=True)/torch.sum(target_text_sample["target_obj_aug_embeds"] * target_text_sample["target_obj_aug_embeds"], dim=1, keepdim=True))*target_text_sample["target_obj_aug_embeds"]
-    ref_diff = ref_diff - ref_diff_projection - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+    elif use_only_number_word:
+        print("use_only_number_word")
+        ref_aug_sentences=[f"{word}" for word in NUMBER_WORDS[:num_classes]]
+        ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize)
+        ref_diff_projection_2 = (torch.mm(ref_diff, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
+        ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+        if normalize_number_word:
+            ref_diff_norm = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes).norm(p=2,dim=-1,keepdim=True) 
+            ref_diff = ref_diff * ref_diff_norm / ref_diff.norm(p=2,dim=-1,keepdim=True)
 
-    merged_text_embeds = apply_reff_diff(target_text_sample["target_obj_aug_embeds"],target_text_sample["target_obj_aug_embeds"],ref_diff,1,linear_shift,start_with_target_with_num)
+    elif use_muti_objs:
+        print("use_muti_objs")
+        ref_diff = get_ref_diff_multi_objs(model,processor,target_text_sample,device,normalize,num_classes,ref)
+    else:
+        ref_diff = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes)
 
-    # if normalize_before_scoring:
+    merged_text_embeds = apply_reff_diff(target_text_sample["target_obj_aug_embeds"],target_text_sample["target_obj_aug_embeds"],ref_diff,factor,linear_shift,start_with_target_with_num)
+
     merged_text_embeds=merged_text_embeds/merged_text_embeds.norm(p=2,dim=-1,keepdim=True)
 
     flat_predictions=[]
     flat_labels=[]
     for number in range(2,num_classes+2):
-        if sample_size is None:
-            selected_data = target_data[number]
-        else:
-            selected_data = target_data[number][:sample_size]
+        selected_data = target_data[number]
         predictions=[]
         for sample in selected_data:
             pixel_values=processor(text=None, images=sample["img"], return_tensors="pt", padding=True)["pixel_values"] # torch.Size([1, 3, 224, 224])
@@ -393,3 +466,4 @@ def run_on_countbench(model,processor,normalize,factor,my_count_bench_dataset,nu
                 predictions.append(torch.argmax(logits_per_image,dim=1).item()+2)
         
     return predictions
+

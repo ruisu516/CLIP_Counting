@@ -1,4 +1,5 @@
-from environment import *
+from PIL import Image, ImageOps, ImageEnhance
+import numpy as np
 
 def fixed_rotation(image, angles=[90, 180, 270]):
     """Rotate the image by fixed angles."""
@@ -41,17 +42,28 @@ def fixed_hue(image, shifts=[0.01, -0.01]):
         images.append(img)
     return images
 
-# Example usage:
-# image_path = "path_to_your_image.jpg"
-# image = Image.open(image_path)
+def data_augmentation(org_data):
+    augmented_data = {}
+    for key in org_data:
+        augmented_data[key] = {}
+        for num in [2,3,4,5]:
+            augmented_data[key][num] = []
+            for sample in org_data[key][num]:
 
-# rotated_images = fixed_rotation(image)
-# flipped_images = fixed_flip(image)
-# brightness_images = fixed_brightness(image)
-# contrast_images = fixed_contrast(image)
-# saturation_images = fixed_saturation(image)
-# hue_images = fixed_hue(image)
+                new_imgs = [sample['img']]
+                new_imgs.extend(fixed_rotation(sample['img']))
+                new_imgs.extend(fixed_flip(sample['img']))
+                new_imgs.extend(fixed_brightness(sample['img']))
+                new_imgs.extend(fixed_contrast(sample['img']))
+                new_imgs.extend(fixed_hue(sample['img']))
 
-# To display or save the augmented images, you can loop through each list and use the .show() or .save() methods.
-
+                augmented_data[key][num] += [
+                    {
+                    'key':sample['key'],
+                    'url':sample['url'],
+                    'img':new_img,
+                    'true number': sample['true number']
+                    } for new_img in new_imgs
+                ]
+    return augmented_data
 
