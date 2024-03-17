@@ -47,12 +47,15 @@ if __name__ == "__main__":
         pretrained_model_name="CompVis/stable-diffusion-v1-4"
         reproduce_stable_diffusion_results(args.eval_dir,pretrained_model_name,device)
     elif "clip" in args.model:
-        model = CLIPModel.from_pretrained(args.model).to(device)
-        model.requires_grad=False
+        model = CLIPModel.from_pretrained(args.model)
         processor = CLIPProcessor.from_pretrained(args.model)
         if args.load_trained_text_projection:
             print(f"Loading trained text projection from {args.trained_text_projection_path}")
             model.text_projection.load_state_dict(torch.load(args.trained_text_projection_path))
+        for name,param in model.named_parameters():
+            param.requires_grad = False
+        model = model.to(device)
+
         if args.dataset=="custom":
             augmented_data = data_augmentation(torch.load(args.data_path))
             
@@ -83,6 +86,6 @@ if __name__ == "__main__":
         elif (args.dataset=="countbench") and (args.task == "classification"):
             # TODO: load dataset
             # TODO: run on countbench
-            countbench_dat = None
+            countbench_data = None
 
 

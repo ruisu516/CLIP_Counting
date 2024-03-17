@@ -256,32 +256,36 @@ def run_on_my_data_clf(
         normalize=normalize
     )
     # print("target_text_sample['target_obj_embeds'].shape,",target_text_sample["target_obj_embeds"].shape,)
-    if use_random_vector:
-        print("use_random_vector")
-        ref_diff_obj = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes)
-        torch.manual_seed(random_seed)
-        ref_diff = torch.randn(*ref_diff_obj.shape).to(device)
-        ref_diff_projection_2 = (torch.mm(ref_diff, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
-        ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-        ref_diff = ref_diff * ref_diff_obj.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
-
-    elif use_only_number_word:
-        print("use_only_number_word")
-        ref_aug_sentences=[f"{word}" for word in NUMBER_WORDS[:num_classes]]
-        ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize)
-        ref_diff_projection_2 = (torch.mm(ref_diff, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
-        ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-        if normalize_number_word:
-            ref_diff_norm = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes).norm(p=2,dim=-1,keepdim=True) 
-            ref_diff = ref_diff * ref_diff_norm / ref_diff.norm(p=2,dim=-1,keepdim=True)
-
-    elif use_muti_objs:
-        print("use_muti_objs")
-        ref_diff = get_ref_diff_multi_objs(model,processor,target_text_sample,device,normalize,num_classes,ref)
+    if ref is None:
+        print("ref if none, set merged_text_embeds=target_obj_aug_embeds")
+        merged_text_embeds = target_text_sample["target_obj_aug_embeds"]
     else:
-        ref_diff = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes)
+        if use_random_vector:
+            print("use_random_vector")
+            ref_diff_obj = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes)
+            torch.manual_seed(random_seed)
+            ref_diff = torch.randn(*ref_diff_obj.shape).to(device)
+            ref_diff_projection_2 = (torch.mm(ref_diff, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
+            ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+            ref_diff = ref_diff * ref_diff_obj.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
 
-    merged_text_embeds = apply_reff_diff(target_text_sample["target_obj_aug_embeds"],target_text_sample["target_obj_aug_embeds"],ref_diff,factor,linear_shift,start_with_target_with_num)
+        elif use_only_number_word:
+            print("use_only_number_word")
+            ref_aug_sentences=[f"{word}" for word in NUMBER_WORDS[:num_classes]]
+            ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize)
+            ref_diff_projection_2 = (torch.mm(ref_diff, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
+            ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+            if normalize_number_word:
+                ref_diff_norm = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes).norm(p=2,dim=-1,keepdim=True) 
+                ref_diff = ref_diff * ref_diff_norm / ref_diff.norm(p=2,dim=-1,keepdim=True)
+
+        elif use_muti_objs:
+            print("use_muti_objs")
+            ref_diff = get_ref_diff_multi_objs(model,processor,target_text_sample,device,normalize,num_classes,ref)
+        else:
+            ref_diff = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes)
+
+        merged_text_embeds = apply_reff_diff(target_text_sample["target_obj_embeds"],target_text_sample["target_obj_aug_embeds"],ref_diff,factor,linear_shift,start_with_target_with_num)
 
     merged_text_embeds=merged_text_embeds/merged_text_embeds.norm(p=2,dim=-1,keepdim=True)
 
