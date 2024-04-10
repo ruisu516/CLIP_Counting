@@ -5,20 +5,20 @@ from transformers import CLIPProcessor, CLIPModel
 import argparse
 from data_aug import data_augmentation
 from clip_count_utils import *
-from datasets import load_dataset
+from my_datasets import load_dataset
 
 def create_my_own_dataset_texts(
         train_set,
         model,
         processor,
         device="cuda",
-        num_class = 2,
+        # num_class = 2,
 ):
     
     my_count_bench_dataset=[]
     for i, sample in tqdm(enumerate(train_set)):
-        if sample["number"] == num_class:
-            continue
+        # if sample["number"] == num_class:
+        #     continue
         if sample["image"] is None:
             try:
                 image = Image.open(requests.get(sample["image_url"], stream=True,timeout=2).raw)
@@ -65,17 +65,17 @@ for model_name in  ["clip-vit-large-patch14"]: #,"clip-vit-large-patch14"
     model = CLIPModel.from_pretrained(f"openai/{model_name}").to(device)
     model.requires_grad=False
     processor = CLIPProcessor.from_pretrained(f"openai/{model_name}")
-    for num_class in [2,3,4,5,6,7,8,9,10]:
+    # for num_class in [2,3,4,5,6,7,8,9,10]:
         
-        my_count_bench = create_my_own_dataset_texts(
-                train_set,
-                model,
-                processor,
-                device=device,
-                num_class = num_class,
-        )
-        torch.save(
-            my_count_bench,
-            os.path.join(save_root_folder,countbench_save_name(model_name,num_class,texts))
-        )
-        del my_count_bench
+    my_count_bench = create_my_own_dataset_texts(
+            train_set,
+            model,
+            processor,
+            device=device,
+            # num_class = num_class,
+    )
+    torch.save(
+        my_count_bench,
+        os.path.join(save_root_folder,countbench_save_name(model_name,"all",texts))
+    )
+    del my_count_bench

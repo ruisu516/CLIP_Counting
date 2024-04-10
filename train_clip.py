@@ -1,64 +1,9 @@
-import torch, os, json
+import torch, os, json, random
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 from transformers import CLIPProcessor, CLIPModel
 import argparse
 from data_aug import data_augmentation
-
-class MyDataset(Dataset):
-    def __init__(self, data_path, ref, processor, clip_model, device):
-    
-        self.true_text_embeds, self.cf_text_embeds, self.image_embeds = self.create_dataset_two2five(
-            data_path, ref, processor, clip_model, device
-        )
-
-        assert self.true_text_embeds.shape[0] == self.cf_text_embeds.shape[0] == self.image_embeds.shape[0]
-
-    def __len__(self):
-        return len(self.true_text_embeds)
-
-    def __getitem__(self, idx):
-        return self.true_text_embeds[idx], self.cf_text_embeds[idx], self.image_embeds[idx]
-    
-    def create_dataset_two2five(self,data_path, ref, processor, clip_model, device):
-        with torch.no_grad():
-            augmented_data = data_augmentation({ref:torch.load(data_path)})[ref]
-            true_text_embeds, cf_text_embeds, image_embeds = [], [], []
-            number_words = ["two", "three", "four", "five"]
-            for idx, number_word in enumerate(number_words):
-                for sample in augmented_data[idx+2]:
-                    # pixel_values = processor(text=None, images=sample["img"], return_tensors="pt", padding=True)["pixel_values"].to(device)
-                    # image_embeds += [get_image_embeds(clip_model, pixel_values, device).detach()] * 3
-                    # inputs = processor(text=[f"{number_word} {ref}"], images=None, return_tensors="pt", padding=True)
-                    # true_text_embeds += [clip_model.text_model(**inputs.to(device))[1].detach()] * 3
-                    # number_cf = ["two", "three", "four", "five"]
-                    # number_cf.pop(idx)
-                    # inputs = processor(text=[f"{ele} {ref}" for ele in number_cf], images=None, return_tensors="pt", padding=True)
-                    # cf_text_embeds += [clip_model.text_model(**inputs.to(device))[1].detach()]
-                    pixel_values=processor(text=None, images=sample["img"], return_tensors="pt", padding=True)["pixel_values"].to(device) # torch.Size([1, 3, 224, 224])
-                    image_embeds+=[get_image_embeds(clip_model,pixel_values.to(device),device=device).detach()]*3
-                    inputs = processor(text=[f"{number_word} {ref}"], images=None, return_tensors="pt", padding=True)
-                    true_text_embeds +=[clip_model.text_model(
-                            input_ids=inputs["input_ids"].to(device),
-                            attention_mask=inputs["attention_mask"].to(device),
-                            position_ids=None,
-                            output_attentions=clip_model.config.output_attentions,
-                            output_hidden_states=clip_model.config.output_hidden_states,
-                            return_dict=clip_model.config.use_return_dict,
-                        )[1].detach()]*3 # torch.Size([1, 512])
-                    number_cf =  number_words.copy()
-                    number_cf.pop(idx)
-                    inputs = processor(text=[f"{ele} {ref}" for ele in number_cf], images=None, return_tensors="pt", padding=True)
-                    cf_text_embeds.append(clip_model.text_model(
-                            input_ids=inputs["input_ids"].to(device),
-                            attention_mask=inputs["attention_mask"].to(device),
-                            position_ids=None,
-                            output_attentions=clip_model.config.output_attentions,
-                            output_hidden_states=clip_model.config.output_hidden_states,
-                            return_dict=clip_model.config.use_return_dict,
-                        )[1].detach()) # torch.Size([3, 512])
-
-            return torch.cat(true_text_embeds, dim=0).detach().clone(), torch.cat(cf_text_embeds, dim=0).detach().clone(), torch.cat(image_embeds, dim=0).detach().clone()
 
 def get_image_embeds(model,pixel_values,device="cpu"):
     vision_outputs = model.vision_model(
@@ -187,6 +132,10 @@ if __name__ == "__main__":
     parser.add_argument("--eval_data_path",type=str,help="path to custom data")
     parser.add_argument("--model",type=str,choices=["openai/clip-vit-base-patch32","openai/clip-vit-base-patch16","openai/clip-vit-large-patch14","stable_diffusion"],help="choose the model")
     parser.add_argument("--model_save_path",type=str,help="path to custom data")
+    parser.add_argument('--add_object_cf_text_embeds', action='store_true')
+    parser.add_argument("--ref_obj_file",type=str,default=None,help="path to the ref objects")   
+
+    
 
     args = parser.parse_args()
 
@@ -197,10 +146,10 @@ if __name__ == "__main__":
     for name,param in clip_model.named_parameters():
         param.requires_grad = False
 
-    dataset = MyDataset(args.train_data_path, args.ref_obj, processor, clip_model, device)
+    dataset = TextEmbeddingDataset(args.train_data_path, args.ref_obj, processor, clip_model, device, add_object_cf_text_embeds=args.add_object_cf_text_embeds,ref_obj_file=args.ref_obj_file)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
-    val_dataset = MyDataset(args.eval_data_path, args.ref_obj, processor, clip_model, device)
+    val_dataset = TextEmbeddingDataset(args.eval_data_path, args.ref_obj, processor, clip_model, device, add_object_cf_text_embeds=args.add_object_cf_text_embeds,ref_obj_file=args.ref_obj_file)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
     print("len(dataset),len(val_dataset)",len(dataset),len(val_dataset))
     logit_scale = clip_model.logit_scale.exp()
@@ -209,15 +158,17 @@ if __name__ == "__main__":
     my_clip_text_projection.weight.data = clip_model.text_projection.weight.data.detach().clone()
     my_clip_text_projection = my_clip_text_projection.to(device)
     
-    if not os.path.isdir(args.model_save_path):
-        os.mkdir(args.model_save_path)
+    model_save_path = f"trained_models/{args.model.split('/')[1]}_{args.ref_obj}_{args.optimizer}_{args.lr}_{args.add_object_cf_text_embeds}"
+
+    if not os.path.isdir(model_save_path):
+        os.mkdir(model_save_path)
     trainer = Trainer(
         dataloader, 
         val_dataloader, 
         my_clip_text_projection, 
         args.lr, 
         logit_scale, 
-        args.model_save_path,
+        model_save_path,
         args.optimizer,
     )
     trainer.train(args.num_epochs)

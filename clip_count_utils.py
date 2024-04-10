@@ -1,4 +1,4 @@
-import torch, spacy
+import torch, spacy, os
 import numpy as np
 from PIL import Image
 import requests
@@ -93,17 +93,23 @@ def text2embedding(text,model,processor,device,normalize):
         normalize=normalize,
     )# torch.Size([k, 512])
 
-def get_target_rep(target_object,target_aug_sentences,model,processor,device="cpu",normalize=True):
+def get_target_rep(target_object,target_aug_sentences,model,processor,device="cuda",normalize=True):
     target_object_prompt_embeds = text2embedding(target_object,model,processor,device,normalize)
     target_aug_text_embeds = text2embedding(target_aug_sentences,model,processor,device,normalize)
 
     return target_object_prompt_embeds,target_aug_text_embeds
 
 
-def get_ref_difference(ref_aug_sentences,ref_object,model,processor,device="cpu",normalize=True):
-    ref_prompt_multi = text2embedding(ref_aug_sentences,model,processor,device,normalize)
-    ref_prompt_single = text2embedding(ref_object,model,processor,device,normalize)
-    ref_diff=ref_prompt_multi-ref_prompt_single # torch.Size([9, 512])
+def get_ref_difference(ref_aug_sentences,ref_object,model,processor,device="cuda",normalize=True,batch_first=True):
+    ref_prompt_multi = text2embedding(ref_aug_sentences,model,processor,device,normalize) # (bz*num_classes,
+    ref_prompt_single = text2embedding(ref_object,model,processor,device,normalize)[:,None,:]  # 1
+    if batch_first:
+        batch_size = len(ref_object)
+        num_classes = int(len(ref_aug_sentences)/batch_size)
+        ref_prompt_multi = ref_prompt_multi[np.arange(batch_size * num_classes).reshape(num_classes,batch_size).T.flatten()].reshape(batch_size, num_classes, -1)
+        ref_diff=ref_prompt_multi-ref_prompt_single
+    else:
+        ref_diff=ref_prompt_multi.reshape(-1,ref_prompt_single.shape[0],ref_prompt_multi.shape[-1]).permute(1,0,2)-ref_prompt_single
     return ref_diff,ref_prompt_single
 
 def apply_reff_diff(start,end,ref_diff,factor,linear_shift,start_with_target_with_num):
@@ -116,7 +122,7 @@ def apply_reff_diff(start,end,ref_diff,factor,linear_shift,start_with_target_wit
             raise NotImplementedError
         return merged_text_embeds
 
-def get_image_embeds(model,pixel_values,device="cpu"):
+def get_image_embeds(model,pixel_values,device="cuda"):
     vision_outputs = model.vision_model(
             pixel_values=pixel_values.to(device),
             output_attentions=model.config.output_attentions,
@@ -131,11 +137,14 @@ def get_image_embeds(model,pixel_values,device="cpu"):
 
 def get_logits(model,text_embeds,image_embeds):
     # print(model.device,text_embeds.device,image_embeds.device)
+    if len(text_embeds.shape) == 2:
+        text_embeds = text_embeds[None,...]
+    if len(image_embeds.shape) == 2:
+        image_embeds = image_embeds[None,...]
     logit_scale = model.logit_scale.exp()
-    logits_per_text = torch.matmul(text_embeds, image_embeds.t()) * logit_scale
-    logits_per_image = logits_per_text.t()
+    logits_per_text = torch.bmm(text_embeds, image_embeds.permute(0,2,1)) * logit_scale
 
-    return logits_per_text,logits_per_image
+    return logits_per_text,logits_per_text.permute(0,2,1)
 
 
 def run_on_my_data_img_retrievel(
@@ -171,7 +180,7 @@ def run_on_my_data_img_retrievel(
         device=device,
         normalize=normalize
     )
-    ref_diff_projection = (torch.mm(ref_diff, ref_prompt_single.t()) / torch.mm(ref_prompt_single, ref_prompt_single.t()).squeeze()) * ref_prompt_single
+    ref_diff_projection = (torch.bmm(ref_diff, ref_prompt_single.permute(0,2,1)) / torch.bmm(ref_prompt_single, ref_prompt_single.permute(0,2,1)).squeeze()) * ref_prompt_single
     ref_diff_projection_2 = (torch.sum(ref_diff-ref_diff_projection * target_text_sample["target_obj_aug_embeds"], dim=1, keepdim=True)/torch.sum(target_text_sample["target_obj_aug_embeds"] * target_text_sample["target_obj_aug_embeds"], dim=1, keepdim=True))*target_text_sample["target_obj_aug_embeds"]
     ref_diff = ref_diff - ref_diff_projection - ref_diff_projection_2 
     merged_text_embeds = apply_reff_diff(target_text_sample["target_obj_embeds"],target_text_sample["target_obj_aug_embeds"],ref_diff,factor,linear_shift,start_with_target_with_num)
@@ -205,6 +214,7 @@ def run_on_my_data_img_retrievel(
 def get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes):
     ref_aug_sentences=[f"{word} {ref}" for word in NUMBER_WORDS[:num_classes]]
 
+    # TODO: get_ref_difference() is changed to return tensors of (bz,num_classes,emb_dim)
     ref_diff,ref_prompt_single=get_ref_difference(
         ref_aug_sentences=ref_aug_sentences,
         ref_object=[ref],
@@ -214,8 +224,8 @@ def get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,
         normalize=normalize
     )
     
-    ref_diff_projection = (torch.mm(ref_diff, ref_prompt_single.t()) / torch.mm(ref_prompt_single, ref_prompt_single.t()).squeeze()) * ref_prompt_single
-    ref_diff_projection_2 = (torch.mm(ref_diff-ref_diff_projection, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
+    ref_diff_projection = (torch.bmm(ref_diff, ref_prompt_single.permute(0,2,1)) / torch.bmm(ref_prompt_single, ref_prompt_single.permute(0,2,1)).squeeze()) * ref_prompt_single
+    ref_diff_projection_2 = (torch.sum((ref_diff-ref_diff_projection) * target_text_sample["target_obj_embeds"], dim=1, keepdim=True)/torch.sum(target_text_sample["target_obj_embeds"] * target_text_sample["target_obj_embeds"], dim=1, keepdim=True))*target_text_sample["target_obj_embeds"]
     ref_diff = ref_diff - ref_diff_projection - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
     
     return ref_diff
@@ -235,7 +245,7 @@ def run_on_my_data_clf(
         ref,
         factor=1,
         normalize=False,
-        device='gpu',
+        device='cuda',
         num_classes=4,
         linear_shift=True,
         start_with_target_with_num=True,
@@ -265,7 +275,7 @@ def run_on_my_data_clf(
             ref_diff_obj = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes)
             torch.manual_seed(random_seed)
             ref_diff = torch.randn(*ref_diff_obj.shape).to(device)
-            ref_diff_projection_2 = (torch.mm(ref_diff, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
+            ref_diff_projection_2 = (torch.bmm(ref_diff, target_text_sample["target_obj_embeds"].permute(0,2,1)) / torch.bmm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].permute(0,2,1)).squeeze()) * target_text_sample["target_obj_embeds"]
             ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
             ref_diff = ref_diff * ref_diff_obj.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
 
@@ -273,9 +283,10 @@ def run_on_my_data_clf(
             print("use_only_number_word")
             ref_aug_sentences=[f"{word}" for word in NUMBER_WORDS[:num_classes]]
             ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize)
-            ref_diff_projection_2 = (torch.mm(ref_diff, target_text_sample["target_obj_embeds"].t()) / torch.mm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].t()).squeeze()) * target_text_sample["target_obj_embeds"]
+            ref_diff_projection_2 = (torch.bmm(ref_diff, target_text_sample["target_obj_embeds"].permute(0,2,1)) / torch.bmm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].permute(0,2,1)).squeeze()) * target_text_sample["target_obj_embeds"]
             ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
             if normalize_number_word:
+                # TODO: the norm should be taken on normalized ref_diff
                 ref_diff_norm = get_ref_diff_helper(model,processor,ref,target_text_sample,device,normalize,num_classes).norm(p=2,dim=-1,keepdim=True) 
                 ref_diff = ref_diff * ref_diff_norm / ref_diff.norm(p=2,dim=-1,keepdim=True)
 
@@ -311,9 +322,21 @@ def run_on_my_data_clf(
 
     return flat_predictions,flat_labels,acc
 
-def run_countbench_sample(sample,model,processor,normalize,factor,num_classes,ref_obj,\
-                      linear_shift=True,device="cpu",use_ref_with_context=False,start_with_target_with_num=True,\
-                        use_target_obj_with_context=False,use_target_aug_sent_with_context=True):
+def run_countbench_sample(
+        sample,
+        model,
+        processor,
+        normalize=False,
+        factor=1,
+        num_classes=4,
+        ref_obj=None,
+        linear_shift=True,
+        device="cuda",
+        use_ref_with_context=True, # TODO: check this part
+        start_with_target_with_num=True,
+        use_target_obj_with_context=True,
+        use_target_aug_sent_with_context=True
+):
     if not use_target_obj_with_context:
         start=sample["target_obj_embeds"].to(device)
     else:
@@ -344,7 +367,7 @@ def run_countbench_sample(sample,model,processor,normalize,factor,num_classes,re
                 device=device,
                 normalize=normalize
             )
-        ref_diff_projection = (torch.mm(ref_diff_per_sample, ref_prompt_single.t()) / torch.mm(ref_prompt_single, ref_prompt_single.t()).squeeze()) * ref_prompt_single
+        ref_diff_projection = (torch.bmm(ref_diff_per_sample, ref_prompt_single.permute(0,2,1)) / torch.bmm(ref_prompt_single, ref_prompt_single.permute(0,2,1)).squeeze()) * ref_prompt_single
         ref_diff_aligned_B = (torch.sum(ref_diff_per_sample-ref_diff_projection * end, dim=1, keepdim=True)/torch.sum(end * end, dim=1, keepdim=True))*end
 
         ref_diff_per_sample = ref_diff_per_sample - ref_diff_projection - ref_diff_aligned_B #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
@@ -361,6 +384,8 @@ def contains_word(sentence, word_list):
             return True, word
     return False, None
 
+
+    
 def sentence_augmentation(sentence):
     sentence=sentence.lower()
 
@@ -387,7 +412,7 @@ def sentence_augmentation(sentence):
     return new_sentences,object_name,sentence_no_num,obj_with_nums
 
 
-def countbench_streaming_data(sample,model,processor,device="cpu",number=None,normalize=True):
+def countbench_streaming_data(sample,model,processor,device="cuda",number=None,normalize=True):
     if (number is not None) and (sample["number"] != number):
         return None
     if sample["image"] is None:
@@ -440,34 +465,99 @@ def countbench_streaming_data(sample,model,processor,device="cpu",number=None,no
             "image_embeds":image_embeds,
         }
 
-def run_on_countbench(model,processor,normalize,factor,my_count_bench_dataset,num_classes,ref_type,ref_obj=None,constant_ref_diff=None,ll_layer=None,\
-                      linear_shift=True,sample_size=48,device="cpu",use_ref_with_context=False,start_with_target_with_num=False,\
-                        use_target_obj_with_context=False,use_target_aug_sent_with_context=False,ref_obj_list=None,
-                        use_context_for_similarity=False,normalize_sim=False,normalize_before_scoring=False,train_set=None,number=None):
-    print("ref_type",ref_type)
+def run_countbench_per_ref(
+        my_count_bench_dataset,
+        model,
+        processor,
+        number,
+        normalize=False,
+        factor=1,
+        num_classes=4,
+        ref_obj=None,
+        linear_shift=True,
+        sample_size=48,
+        device="cuda",
+        use_ref_with_context=True, # TODO: check this part
+        start_with_target_with_num=True,
+        use_target_obj_with_context=True,
+        use_target_aug_sent_with_context=True
+):    
     
-    
+    # my_count_bench_dataset=create_my_own_dataset(countbench_set,model,processor,number=number,normalize=normalize)
     predictions = []
-    if my_count_bench_dataset is not None:
-        for i, sample in enumerate(my_count_bench_dataset[:sample_size]):
-            merged_text_embeds = run_countbench_sample(sample,model,processor,normalize,factor,num_classes,ref_obj,\
-                      linear_shift=linear_shift,device=device,use_ref_with_context=use_ref_with_context,start_with_target_with_num=start_with_target_with_num,\
-                        use_target_obj_with_context=use_target_obj_with_context,use_target_aug_sent_with_context=use_target_aug_sent_with_context)
-                
-            # if normalize_before_scoring:
-            _,logits_per_image=get_logits(model,merged_text_embeds,sample["image_embeds"].to(device))
-            predictions.append(torch.argmax(logits_per_image,dim=1).item()+2)
-    else:
-        for i, raw_sample in tqdm(enumerate(train_set)):
-            sample = countbench_streaming_data(raw_sample,model,processor,device,number,normalize)
-            if sample is not None:
-                merged_text_embeds = run_countbench_sample(sample,model,processor,normalize,factor,num_classes,ref_obj,\
-                      linear_shift=linear_shift,device=device,use_ref_with_context=use_ref_with_context,start_with_target_with_num=start_with_target_with_num,\
-                        use_target_obj_with_context=use_target_obj_with_context,use_target_aug_sent_with_context=use_target_aug_sent_with_context)
-                    
-                # if normalize_before_scoring:
-                _,logits_per_image=get_logits(model,merged_text_embeds,sample["image_embeds"].to(device))
-                predictions.append(torch.argmax(logits_per_image,dim=1).item()+2)
-        
+    for i, sample in enumerate(my_count_bench_dataset[:sample_size]):
+        merged_text_embeds = run_countbench_sample(
+            sample,
+            model,
+            processor,
+            normalize=normalize,
+            factor=factor,
+            num_classes=num_classes,
+            ref_obj=ref_obj,
+            linear_shift=linear_shift,
+            device=device,
+            use_ref_with_context=use_ref_with_context,
+            start_with_target_with_num=start_with_target_with_num,
+            use_target_obj_with_context=use_target_obj_with_context,
+            use_target_aug_sent_with_context=use_target_aug_sent_with_context
+        )
+            
+        # if normalize_before_scoring:
+        _,logits_per_image=get_logits(model,merged_text_embeds,sample["image_embeds"].to(device))
+        predictions.append(torch.argmax(logits_per_image,dim=1).item()+2)
     return predictions
+
+# def run_countbench(countbench_set,model,processor,ref_list,num_classes,factors,normalize,linear_shift,use_target_obj_with_context,use_target_aug_sent_with_context,\
+#                     use_ref_with_context,start_with_target_with_num,file_name,ref_type="obj",use_context_for_similarity=False,\
+#                     normalize_sim=False,device="cuda",ll_layer=None):
+#     results = []
+#     counter = 0
+#     for my_ref_obj in tqdm(ref_list):
+#         print(f'========={my_ref_obj}=============')
+        
+#         flat_predictions = []
+#         flat_labels = []
+#         for number in range(2,num_classes+2):
+#             print("number",number)
+            
+#             print(ref_type)
+#             ref_obj = my_ref_obj
+#             ref_diff = None
+            
+#             predictions=run_countbencha_per_ref(
+#                 model=model,
+#                 processor=processor,
+#                 normalize=normalize,
+#                 ref_obj=ref_obj,
+#                 factor=factor,
+#                 constant_ref_diff=ref_diff,
+#                 my_count_bench_dataset=my_count_bench_dataset,
+#                 num_classes=num_classes,
+#                 linear_shift=linear_shift,
+#                 sample_size=48,
+#                 device=device,
+#                 use_ref_with_context=use_ref_with_context,
+#                 start_with_target_with_num=start_with_target_with_num,
+#                 use_target_obj_with_context=use_target_obj_with_context,
+#                 use_target_aug_sent_with_context=use_target_aug_sent_with_context,
+#             )
+
+#             flat_predictions+=predictions
+#             flat_labels+=[number]*len(predictions)
+#             print("Class:",number)
+#             print("Acc:",np.mean(np.array(predictions)==np.array([number]*len(predictions))).round(4)*100)
+#             avg_acc = np.mean(np.array(flat_predictions)==np.array(flat_labels)).round(4)*100
+#             acc_by_factor.append(avg_acc)
+#             print("Average Acc:",avg_acc)
+#         results.append(acc_by_factor)
+#         counter += 1
+#         if file_name is not None:
+#             if isinstance(my_ref_obj,str):
+#                 pd.DataFrame(results,columns=factors,index=ref_list[:counter]).to_csv(file_name)
+#             else:
+#                 pd.DataFrame(results,columns=factors).to_csv(file_name)
+#     if isinstance(my_ref_obj,str):
+#         return pd.DataFrame(results,columns=factors,index=ref_list)
+#     else:
+#         return pd.DataFrame(results,columns=factors)
 
