@@ -243,7 +243,7 @@ def img_clf_countbench(
         
         if use_only_number_word:
             ref_aug_sentences=[f"{word}" for word in NUMBER_WORDS[:num_classes]]
-            ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize).unsqueeze(0).repeat(batch_size, 1, 1)
+            ref_diff = text2embedding(ref_aug_sentences,model,processor,device,True).unsqueeze(0).repeat(batch_size, 1, 1)
         if ref_obj is not None:
             if use_multi_objs:
                 ref_diff_list,ref_prompt_single_list=[],[]
@@ -281,19 +281,25 @@ def img_clf_countbench(
         if use_self_as_ref:
             ref_embeds = text2embedding(target_obj_text,model,processor,device,normalize)[:,None,:]
             ref_aug_embeds = text2embedding(target_obj_aug_text,model,processor,device,normalize)
+            ref_aug_embeds = ref_aug_embeds[np.arange(batch_size * num_classes).reshape(num_classes,batch_size).T.flatten()].reshape(batch_size, num_classes, -1)
+
             ref_diff = ref_embeds - ref_aug_embeds
+            # print("ref_diff.shape",ref_diff.shape)
 
         if use_only_number_word or use_self_as_ref:
             # print("ref_diff.shape",ref_diff.shape)
-            ref_diff_projection_2 = torch.bmm(ref_diff, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
+            # ref_diff_projection_2 = torch.bmm(ref_diff, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
+            ref_diff_projection_2 = (torch.sum(ref_diff*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
             ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
             if use_only_number_word and normalize_number_word and ref_obj is not None:
                 obj_ref_diff,obj_ref_prompt_single = get_ref_embed_helper(ref_obj)
                 obj_ref_diff_projection = (torch.bmm(obj_ref_diff, obj_ref_prompt_single.permute(0,2,1)) / torch.bmm(obj_ref_prompt_single, obj_ref_prompt_single.permute(0,2,1))) * obj_ref_prompt_single
-                obj_ref_diff_projection_2 = torch.bmm(obj_ref_diff-obj_ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
+                # obj_ref_diff_projection_2 = torch.bmm(obj_ref_diff-obj_ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
+                obj_ref_diff_projection_2 = (torch.sum((obj_ref_diff-obj_ref_diff_projection)*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
                 obj_ref_diff = obj_ref_diff - obj_ref_diff_projection - obj_ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
 
                 ref_diff = ref_diff * obj_ref_diff.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
+            # print("ref_diff.shape",ref_diff.shape)
             merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,factor,linear_shift,start_with_target_with_num)
         elif ref_obj is None:
             # print("ref_obj is None")
@@ -302,15 +308,15 @@ def img_clf_countbench(
             orth_ref_diff = 0
             for ref_diff, ref_prompt_single in zip(ref_diff_list,ref_prompt_single_list):
                 ref_diff_projection = (torch.bmm(ref_diff, ref_prompt_single.permute(0,2,1)) / torch.bmm(ref_prompt_single, ref_prompt_single.permute(0,2,1))) * ref_prompt_single
-                ref_diff_projection_2 = torch.bmm(ref_diff-ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
-                # ref_diff_projection_2 = (torch.sum((ref_diff-ref_diff_projection)*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
+                # ref_diff_projection_2 = torch.bmm(ref_diff-ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
+                ref_diff_projection_2 = (torch.sum((ref_diff-ref_diff_projection)*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
                 orth_ref_diff += ref_diff - ref_diff_projection - ref_diff_projection_2#+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
                 del ref_diff,ref_prompt_single,ref_diff_projection,ref_diff_projection_2
             merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,orth_ref_diff/len(ref_obj),factor,linear_shift,start_with_target_with_num)
         else:
             ref_diff_projection = (torch.bmm(ref_diff, ref_prompt_single.permute(0,2,1)) / torch.bmm(ref_prompt_single, ref_prompt_single.permute(0,2,1))) * ref_prompt_single
-            ref_diff_projection_2 = torch.bmm(ref_diff-ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
-            # ref_diff_projection_2 = (torch.sum((ref_diff-ref_diff_projection)*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
+            # ref_diff_projection_2 = torch.bmm(ref_diff-ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
+            ref_diff_projection_2 = (torch.sum((ref_diff-ref_diff_projection)*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
 
             ref_diff = ref_diff - ref_diff_projection - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
             merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,factor,linear_shift,start_with_target_with_num)

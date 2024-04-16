@@ -63,7 +63,7 @@ if __name__ == "__main__":
     
     if not os.path.isdir(args.root_folder):
         os.mkdir(args.root_folder)
-    eval_dir = os.path.join(args.root_folder,f"{args.model.split('/')[1]}_{args.trained_text_projection_path.replace('.','').replace('/','_')}_{args.dataset}_{args.task}_{ref_save_name}_{args.use_only_number_word}{args.normalize_number_word}_{args.use_random_vector}_{args.use_multi_objs}_{args.use_target_obj_with_context}_{args.not_use_target_aug_sent_with_context}")
+    eval_dir = os.path.join(args.root_folder,f"{args.model.split('/')[1]}_{args.trained_text_projection_path.replace('.','').replace('/','_')}_{args.dataset}_{args.task}_{ref_save_name}_{args.use_only_number_word}{args.normalize_number_word}_{args.use_random_vector}_{args.use_multi_objs}_{args.use_target_obj_with_context}_{args.not_use_target_aug_sent_with_context}_{args.use_self_as_ref}")
     if not os.path.isdir(eval_dir):
         os.mkdir(eval_dir)
 

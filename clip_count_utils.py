@@ -282,7 +282,7 @@ def run_on_my_data_clf(
         elif use_only_number_word:
             print("use_only_number_word")
             ref_aug_sentences=[f"{word}" for word in NUMBER_WORDS[:num_classes]]
-            ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize)
+            ref_diff = text2embedding(ref_aug_sentences,model,processor,device,True)
             ref_diff_projection_2 = (torch.bmm(ref_diff, target_text_sample["target_obj_embeds"].permute(0,2,1)) / torch.bmm(target_text_sample["target_obj_embeds"], target_text_sample["target_obj_embeds"].permute(0,2,1)).squeeze()) * target_text_sample["target_obj_embeds"]
             ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
             if normalize_number_word:
