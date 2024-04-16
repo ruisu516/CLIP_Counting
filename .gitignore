@@ -2,3 +2,6 @@
 *.txt
 *.xlsx
 *.pth
+
+countbench_scripts/
+train_clip_scripts/
