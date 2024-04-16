@@ -2,6 +2,8 @@
 *.txt
 *.xlsx
 *.pth
+*.sh
+*.json
 
 countbench_scripts/
 train_clip_scripts/
