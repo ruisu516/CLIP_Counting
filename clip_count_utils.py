@@ -30,6 +30,7 @@ NUMBER_WORDS = [
     "six", "seven", "eight", "nine",
     'ten'
 ]
+ARABIC_NUMBER_WORDS = ["2","3","4","5","6","7","8","9","10"]
 SUB_NUMBER_RANGE=[2,3,4,5]
 
 def generate_random_vectors(shape, seed,N=10):
@@ -158,7 +159,6 @@ def run_on_my_data_img_retrievel(
         factor,
         linear_shift=True,
         start_with_target_with_num=True,
-        normalize_before_scoring=False
 ):
     ref_aug_sentences=[f"{word} {ref}" for word in NUMBER_WORDS[:num_classes]]
     target_aug_sentences=[f"{word} {OBJ_NAMES[target]}" for word in NUMBER_WORDS[:num_classes]]
@@ -464,100 +464,4 @@ def countbench_streaming_data(sample,model,processor,device="cuda",number=None,n
             "target_obj_aug_embeds_with_context":target_obj_aug_embeds_with_context,
             "image_embeds":image_embeds,
         }
-
-def run_countbench_per_ref(
-        my_count_bench_dataset,
-        model,
-        processor,
-        number,
-        normalize=False,
-        factor=1,
-        num_classes=4,
-        ref_obj=None,
-        linear_shift=True,
-        sample_size=48,
-        device="cuda",
-        use_ref_with_context=True, # TODO: check this part
-        start_with_target_with_num=True,
-        use_target_obj_with_context=True,
-        use_target_aug_sent_with_context=True
-):    
-    
-    # my_count_bench_dataset=create_my_own_dataset(countbench_set,model,processor,number=number,normalize=normalize)
-    predictions = []
-    for i, sample in enumerate(my_count_bench_dataset[:sample_size]):
-        merged_text_embeds = run_countbench_sample(
-            sample,
-            model,
-            processor,
-            normalize=normalize,
-            factor=factor,
-            num_classes=num_classes,
-            ref_obj=ref_obj,
-            linear_shift=linear_shift,
-            device=device,
-            use_ref_with_context=use_ref_with_context,
-            start_with_target_with_num=start_with_target_with_num,
-            use_target_obj_with_context=use_target_obj_with_context,
-            use_target_aug_sent_with_context=use_target_aug_sent_with_context
-        )
-            
-        # if normalize_before_scoring:
-        _,logits_per_image=get_logits(model,merged_text_embeds,sample["image_embeds"].to(device))
-        predictions.append(torch.argmax(logits_per_image,dim=1).item()+2)
-    return predictions
-
-# def run_countbench(countbench_set,model,processor,ref_list,num_classes,factors,normalize,linear_shift,use_target_obj_with_context,use_target_aug_sent_with_context,\
-#                     use_ref_with_context,start_with_target_with_num,file_name,ref_type="obj",use_context_for_similarity=False,\
-#                     normalize_sim=False,device="cuda",ll_layer=None):
-#     results = []
-#     counter = 0
-#     for my_ref_obj in tqdm(ref_list):
-#         print(f'========={my_ref_obj}=============')
-        
-#         flat_predictions = []
-#         flat_labels = []
-#         for number in range(2,num_classes+2):
-#             print("number",number)
-            
-#             print(ref_type)
-#             ref_obj = my_ref_obj
-#             ref_diff = None
-            
-#             predictions=run_countbencha_per_ref(
-#                 model=model,
-#                 processor=processor,
-#                 normalize=normalize,
-#                 ref_obj=ref_obj,
-#                 factor=factor,
-#                 constant_ref_diff=ref_diff,
-#                 my_count_bench_dataset=my_count_bench_dataset,
-#                 num_classes=num_classes,
-#                 linear_shift=linear_shift,
-#                 sample_size=48,
-#                 device=device,
-#                 use_ref_with_context=use_ref_with_context,
-#                 start_with_target_with_num=start_with_target_with_num,
-#                 use_target_obj_with_context=use_target_obj_with_context,
-#                 use_target_aug_sent_with_context=use_target_aug_sent_with_context,
-#             )
-
-#             flat_predictions+=predictions
-#             flat_labels+=[number]*len(predictions)
-#             print("Class:",number)
-#             print("Acc:",np.mean(np.array(predictions)==np.array([number]*len(predictions))).round(4)*100)
-#             avg_acc = np.mean(np.array(flat_predictions)==np.array(flat_labels)).round(4)*100
-#             acc_by_factor.append(avg_acc)
-#             print("Average Acc:",avg_acc)
-#         results.append(acc_by_factor)
-#         counter += 1
-#         if file_name is not None:
-#             if isinstance(my_ref_obj,str):
-#                 pd.DataFrame(results,columns=factors,index=ref_list[:counter]).to_csv(file_name)
-#             else:
-#                 pd.DataFrame(results,columns=factors).to_csv(file_name)
-#     if isinstance(my_ref_obj,str):
-#         return pd.DataFrame(results,columns=factors,index=ref_list)
-#     else:
-#         return pd.DataFrame(results,columns=factors)
 

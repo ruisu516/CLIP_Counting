@@ -141,3 +141,39 @@ class ProcessedCountBenchDataset(Dataset):
         sample = self.data[idx]
 
         return sample["image_embeds"],sample['target_obj_text'], sample["target_obj_aug_text"][:self.num_classes], sample["target_obj_with_context_text"], sample["target_obj_aug_with_context_text"][:self.num_classes], sample["gt_count"]
+
+
+class CustomDataset(Dataset):
+    def __init__(
+            self, 
+            data,
+            processor,
+            model,
+            target_obj,
+            number_words,
+            device="cuda",
+    ):
+        self.data = []
+        for number in range(2,6):
+            for sample in data[number]:
+                pixel_values=processor(text=None, images=sample["img"], return_tensors="pt", padding=True)["pixel_values"] # torch.Size([1, 3, 224, 224])
+                image_embeds = get_image_embeds(
+                    model=model,
+                    pixel_values=pixel_values.to(device),
+                    device=device
+                ).detach().cpu()
+                self.data.append({
+                    "gt_count":number,
+                    "target_obj_text":target_obj,
+                    "target_obj_aug_text":[f"{number_word} {target_obj}" for number_word in number_words],
+                    "image_embeds":image_embeds,
+                }) 
+
+    
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sample = self.data[idx]
+
+        return sample["image_embeds"],sample['target_obj_text'], sample["target_obj_aug_text"], sample['target_obj_text'], sample["target_obj_aug_text"], sample["gt_count"]

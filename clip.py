@@ -9,6 +9,7 @@ import os
 from tqdm import tqdm
 from my_datasets import *
 import pickle
+import wandb
 
 
 DESIRED_COLUMNS = ["average", "dogs", "cats", "lions", "chairs", "goats", "cows", "cherries", "roses", "boats", "ref"]
@@ -22,14 +23,15 @@ DESIRED_COLUMNS = ["average", "dogs", "cats", "lions", "chairs", "goats", "cows"
 # processor = CLIPProcessor.from_pretrained(model_name)
 
 
-def get_file_name(task,model_name,ref,data_name="",num_classes="",factor=1,extension="csv"):
-    if ref is None:
-        ref_str = "None"
-    elif isinstance(ref,str):
-        ref_str = ref
-    elif isinstance(ref,list):
-        ref_str = f"{len(ref)}_refs"
-    return f"{task}_{model_name.split('/')[1]}_{ref_str}_{data_name}_{num_classes}{factor}.{extension}"
+# def get_file_name(model_name,ref,target_obj,data_name="",num_classes="",extension="csv"):
+#     if ref is None:
+#         ref_str = "None"
+#     elif isinstance(ref,str):
+#         ref_str = ref
+#     elif isinstance(ref,list):
+#         ref_str = f"{len(ref)}_refs"
+#     target_name = target_obj if target_obj is not None else "None"
+#     return f"{model_name.split('/')[1]}_{ref_str}_{target_name}_{data_name}_{num_classes}.{extension}"
 
 
 def image_retrievel(model_name,ref_obj,sample_size,augmented_data,eval_dir,device="cpu"):
@@ -72,7 +74,7 @@ def image_retrievel(model_name,ref_obj,sample_size,augmented_data,eval_dir,devic
         all_mean_probs_by_factors.append(all_mean_probs_by_target)
 
     # pb_pd = pd.DataFrame(all_probs_by_factors,columns=list(augmented_data.keys()))
-    # pb_pd.index = factors_list[1:]
+    # pb_pd.index = args.factors_list[1:]
     # pb_pd.to_csv(f"csv/final/{fn}")
 
     mean_pb_pd = pd.DataFrame(all_mean_probs_by_factors,columns=list(augmented_data.keys()))
@@ -90,126 +92,158 @@ def generate_random_vectors(shape, seed,N=10):
         
     concatenated_vectors = torch.stack(vectors)
     return concatenated_vectors
-def img_clf_custom(
-        model_name,
-        model,
-        processor,
-        ref_objs,
-        target_data,
-        eval_dir,
-        task_name="img_clf_custom",
-        factor=1,
-        device="gpu",
-        normalize=False,
-        linear_shift=True,
-        start_with_target_with_num = True,
-        use_only_number_word=False,
-        normalize_number_word=False,
-        use_random_vector=False,
-        random_seed=None,
-        use_multi_objs=False,
+
+
+
+# def img_clf_custom(
+#         model_name,
+#         model,
+#         processor,
+#         ref_objs,
+#         target_data,
+#         eval_dir,
+#         args,
+#         task_name="img_clf_custom",
+#         device="gpu",
+# ):
+#     """
+#         run image classification on custom dataset
+#     """
+#     if args.use_arabic_nums:
+#         number_words = ARABIC_NUMBER_WORDS[:args.num_classes]
+#     else:
+#         number_words = NUMBER_WORDS[:args.num_classes]
+
+
+#     print(f"Running task {task_name}, using model {model_name}")
+#     # Initialize an empty list to hold accuracy by ref to build up the DataFrame incrementally
+    
+
+#     # Check if the evaluation directory exists, if not, create it
+#     if not os.path.isdir(eval_dir):
+#         os.mkdir(eval_dir)
+
+#     # Initialize or clear the file
+#     file_name = get_file_name(task_name, model_name, ref_objs, data_name="", num_classes="", factor=args.factor)
+#     file_path = os.path.join(eval_dir, file_name)
+#     # Create an empty DataFrame or clear the existing file to start fresh
+#     pd.DataFrame().to_csv(file_path)
+
+#     if not args.use_multi_objs:
+#         iteration = ref_objs 
+#     else:
+#         iteration = [ref_objs]
+#     acc_by_ref = []
+#     for ref in tqdm(iteration, desc=f"Processing refs for task {task_name}"):
+#         acc_by_target = []
+#         # Adding a progress bar for iterating over target_data keys
+#         print(f"Processing targets for ref: {ref}")
+#         for target in tqdm(target_data.keys()):
+#             _, _, acc = run_on_my_data_clf(
+#                 model=model,
+#                 processor=processor,
+#                 target_data=target_data[target],
+#                 target=target,
+#                 ref=ref,
+#                 factor=args.factor,
+#                 normalize=normalize,
+#                 device=device,
+#                 num_classes=4,
+#                 linear_shift=linear_shift,
+#                 start_with_target_with_num=start_with_target_with_num,
+#                 use_only_number_word=args.use_only_number_word,
+#                 normalize_number_word=args.normalize_number_word,
+#                 use_random_vector=use_random_vector,
+#                 random_seed=random_seed,
+#                 use_multi_objs=args.use_multi_objs,
+#             )
+#             acc_by_target.append(acc)
+#         acc_by_ref.append(acc_by_target)
+
+#         # Update the DataFrame and save after processing each `ref`
+#         acc_pd = pd.DataFrame(np.array(acc_by_ref), columns=list(target_data.keys()))
+#         acc_pd["average"] = np.array(acc_by_ref).mean(axis=1)
+#         acc_pd["ref"] = iteration[:len(acc_by_ref)]  # Match the length of acc_by_ref to avoid index out of bounds
+#         # Save/update the CSV file
+#         print(f"update {file_path}...")
+#         try:
+#             acc_pd = acc_pd[DESIRED_COLUMNS]
+#         except:
+#             pass
+#         acc_pd.to_csv(file_path, index=False)  # Use index=False to avoid writing row indices
+
+def generate_file_path(args,ext="pth"):
+    """
+    Generates a unique file path based on the provided arguments.
+    Transforms all arguments into a string, replaces slashes with underscores,
+    and uses a hash to ensure the filename is unique and not excessively long.
+    """
+    # Construct a list of argument values, replacing any slashes in strings
+    components = []
+    for key, value in sorted(args.items()):
+        if key in ["root_folder","custom_data_path","processed_countbench_data_path","test_batch_size","random_seed","not_log_wandb"]:
+            continue
+        if value is None:
+            continue
+        value = str(value).replace("/", "_")
+        components.append(f"{value}")
+
+    path_string = '_'.join(components)
+
+    return f"{path_string}.{ext}"
+
+def img_clf(
+    target_data,
+    model,
+    processor,
+    args,
+    target_obj=None,
+    ref_obj=None,
+    normalize=False,
+    linear_shift=True,
+    start_with_target_with_num=True,
+    device="cuda",
 ):
-    """
-        run image classification on custom dataset
-    """
+    configs = args.__dict__
+    configs["target_obj"] = target_obj
+    configs["normalize"] = normalize
+    configs["linear_shift"] = linear_shift
+    configs["start_with_target_with_num"] = start_with_target_with_num
+                    
     
-
-    print(f"Running task {task_name}, using model {model_name}")
-    # Initialize an empty list to hold accuracy by ref to build up the DataFrame incrementally
     
+    if not args.not_log_wandb:
+        wandb.login(key = "f120e5e4c8c84329e87f496f85e6f7ded7732680")
+        api = wandb.Api()
+        runs = api.runs(path="ruisu/clip_count_new")
+        for run in runs:
+            config_matches = all(run.config.get(key) == value for key, value in configs.items())
+            if config_matches and run.state == "finished":
+                print(f"Run {run.id} matches the target configuration and is finished.")
+                return None
 
-    # Check if the evaluation directory exists, if not, create it
-    if not os.path.isdir(eval_dir):
-        os.mkdir(eval_dir)
+        wandb.init(project="clip_count_new", config=configs, entity="ruisu")
+    print(configs)
 
-    # Initialize or clear the file
-    file_name = get_file_name(task_name, model_name, ref_objs, data_name="", num_classes="", factor=factor)
-    file_path = os.path.join(eval_dir, file_name)
-    # Create an empty DataFrame or clear the existing file to start fresh
-    pd.DataFrame().to_csv(file_path)
+    use_target_aug_sent_with_context = not args.not_use_target_aug_sent_with_context
 
-    if not use_multi_objs:
-        iteration = ref_objs 
+    if args.use_arabic_nums:
+        number_words = ARABIC_NUMBER_WORDS[:args.num_classes]
     else:
-        iteration = [ref_objs]
-    acc_by_ref = []
-    for ref in tqdm(iteration, desc=f"Processing refs for task {task_name}"):
-        acc_by_target = []
-        # Adding a progress bar for iterating over target_data keys
-        print(f"Processing targets for ref: {ref}")
-        for target in tqdm(target_data.keys()):
-            _, _, acc = run_on_my_data_clf(
-                model=model,
-                processor=processor,
-                target_data=target_data[target],
-                target=target,
-                ref=ref,
-                factor=factor,
-                normalize=normalize,
-                device=device,
-                num_classes=4,
-                linear_shift=linear_shift,
-                start_with_target_with_num=start_with_target_with_num,
-                use_only_number_word=use_only_number_word,
-                normalize_number_word=normalize_number_word,
-                use_random_vector=use_random_vector,
-                random_seed=random_seed,
-                use_multi_objs=use_multi_objs,
-            )
-            acc_by_target.append(acc)
-        acc_by_ref.append(acc_by_target)
+        number_words = NUMBER_WORDS[:args.num_classes]
 
-        # Update the DataFrame and save after processing each `ref`
-        acc_pd = pd.DataFrame(np.array(acc_by_ref), columns=list(target_data.keys()))
-        acc_pd["average"] = np.array(acc_by_ref).mean(axis=1)
-        acc_pd["ref"] = iteration[:len(acc_by_ref)]  # Match the length of acc_by_ref to avoid index out of bounds
-        # Save/update the CSV file
-        print(f"update {file_path}...")
-        try:
-            acc_pd = acc_pd[DESIRED_COLUMNS]
-        except:
-            pass
-        acc_pd.to_csv(file_path, index=False)  # Use index=False to avoid writing row indices
-
-def img_clf_countbench(
-        model_name,
-        eval_dir,
-        data_path,
-        model,
-        processor,
-        num_classes,
-        task_name="img_clf_countbench",
-        ref_obj=None,
-        normalize=False,
-        factor=1,
-        linear_shift=True,
-        test_bz=32,
-        use_target_obj_with_context=True,
-        use_target_aug_sent_with_context=True,
-        use_ref_with_context=False, # TODO: check this part
-        start_with_target_with_num=True,
-        device="cuda",
-        use_only_number_word=False,
-        normalize_number_word=False,
-        use_multi_objs=False,
-        use_self_as_ref=False,
-):
     def get_ref_embed_helper(ref_obj):
-        # print("target_obj_aug_with_context_text",target_obj_aug_with_context_text)
-        # print("target_obj_with_context_text",target_obj_with_context_text)
-        # print("target_obj_text",target_obj_text)
-        if use_ref_with_context:
+
+        if args.use_ref_with_context:
             ref_object = [context.replace(org,ref_obj) for org,context in zip(target_obj_text,target_obj_with_context_text)]
             ref_aug_sentences = [item.replace(target,ref_obj) for tuple_ in target_obj_aug_with_context_text for item,target in zip(tuple_,target_obj_text)]
 
         else:
             ref_object = [ref_obj]*len(target_obj_text)
             ref_aug_sentences=[]
-            for number in NUMBER_WORDS[:num_classes]:
+            for number in number_words:
                 ref_aug_sentences += [f"{number} {ref_obj}"]*batch_size
         
-        # print(ref_aug_sentences)
-        # print(ref_object)
         return get_ref_difference(
             ref_aug_sentences=ref_aug_sentences,
             ref_object=ref_object,
@@ -219,114 +253,137 @@ def img_clf_countbench(
             normalize=normalize,
             batch_first=True
         )
-        
-    print("use_only_number_word",use_only_number_word,"normalize_number_word",normalize_number_word)
-    print("use_ref_with_context",use_ref_with_context)
-    print("use_multi_objs",use_multi_objs,len(ref_obj) if use_multi_objs else None)
-    print("ref_obj",ref_obj,factor)
-    print("use_target_obj_with_context",use_target_obj_with_context)
-    print("use_target_aug_sent_with_context",use_target_aug_sent_with_context)
-    print("use_self_as_ref",use_self_as_ref)
-    countbench_dataset = ProcessedCountBenchDataset(
-        data=torch.load(data_path,map_location=device),
-        device=device,
-        num_classes=num_classes
-    )
-    print("len(countbench_dataset)",len(countbench_dataset))
-    countbench_dataloader = DataLoader(countbench_dataset, batch_size=test_bz, shuffle=False)
+    
+    def proj_1_helper(op1,op2):
+        return (torch.bmm(op1, op2.permute(0,2,1)) / torch.bmm(op2, op2.permute(0,2,1))) * op2
+
+    def proj_2_helper(op1,op2):
+        """
+            op1: (bz, num_class, embed_dim)
+            op2: (bz, embed_dim, 1)
+        """
+        return torch.bmm(op1, op2)/torch.sum(op2 * op2, dim=1, keepdim=True)*op2.permute(0,2,1).repeat(1,args.num_classes,1)
+
+    if "countbench" in args.dataset:
+        dataset = ProcessedCountBenchDataset(
+            data=target_data,
+            device=device,
+            num_classes=args.num_classes
+        )
+    elif "custom" in args.dataset:
+        dataset = CustomDataset(
+            data=target_data,
+            processor=processor,
+            model=model,
+            target_obj=target_obj,
+            number_words=number_words,
+            device=device,
+        )
+
+    print("len(dataset)",len(dataset))
+    dataloader = DataLoader(dataset, batch_size=args.test_batch_size, shuffle=False)
 
     predictions = []
     gt_labels = []
     
-    for image_embeds,target_obj_text,target_obj_aug_text,target_obj_with_context_text,target_obj_aug_with_context_text, gt_count in countbench_dataloader:
-        batch_size = len(image_embeds)
-        
-        if use_only_number_word:
-            ref_aug_sentences=[f"{word}" for word in NUMBER_WORDS[:num_classes]]
-            ref_diff = text2embedding(ref_aug_sentences,model,processor,device,True).unsqueeze(0).repeat(batch_size, 1, 1)
-        if ref_obj is not None:
-            if use_multi_objs:
-                ref_diff_list,ref_prompt_single_list=[],[]
-                for r in ref_obj:
-                    ref_diff,ref_prompt_single = get_ref_embed_helper(r)
-                    ref_diff_list.append(ref_diff)
-                    ref_prompt_single_list.append(ref_prompt_single)
-                    del ref_diff,ref_prompt_single
-            else:
-                ref_diff,ref_prompt_single = get_ref_embed_helper(ref_obj)
+    for image_embeds,target_obj_text,target_obj_aug_text,target_obj_with_context_text,target_obj_aug_with_context_text, gt_count in dataloader:
+        batch_size = len(image_embeds)            
                 
             
         target_obj_aug_with_context_text = [item for tuple_ in target_obj_aug_with_context_text for item in tuple_]
         target_obj_aug_text = [item for tuple_ in target_obj_aug_text for item in tuple_]
 
-        if use_target_obj_with_context:
-            target_embeds = text2embedding(target_obj_with_context_text,model,processor,device,normalize)
-        else:
-            target_embeds = text2embedding(target_obj_text,model,processor,device,normalize)
+        target_embeds = text2embedding(
+            target_obj_with_context_text if args.use_target_obj_with_context else target_obj_text,
+            model,processor,device,normalize
+        )[...,None]
 
-        if use_target_aug_sent_with_context:
-            target_aug_embeds = text2embedding(target_obj_aug_with_context_text,model,processor,device,normalize)
-        else:
-            target_aug_embeds = text2embedding(target_obj_aug_text,model,processor,device,normalize)
-        # target_aug_embeds = target_aug_embeds.reshape(-1,batch_size,target_aug_embeds.shape[-1]).permute(1,0,2)
-        target_aug_embeds = target_aug_embeds[np.arange(batch_size * num_classes).reshape(num_classes,batch_size).T.flatten()].reshape(batch_size, num_classes, -1)
+        target_aug_embeds = text2embedding(
+            target_obj_aug_with_context_text if use_target_aug_sent_with_context else target_obj_aug_text,
+            model,processor,device,normalize
+        )[np.arange(batch_size * args.num_classes).reshape(args.num_classes,batch_size).T.flatten()].reshape(batch_size, args.num_classes, -1)
+        
+        if args.use_only_number_word:
+            #TODO
+            ref_aug_sentences=[f"{word}" for word in number_words]
+            ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize).unsqueeze(0).repeat(batch_size, 1, 1)
+        if ref_obj is not None:
+            if args.use_multi_objs:
+                ref_diff_list,ref_prompt_single_list,semantic_similarity_list=[],[],[]
+                for r in ref_obj:
+                    ref_diff,ref_prompt_single = get_ref_embed_helper(r)
+                    ref_diff_list.append(ref_diff)
+                    ref_prompt_single_list.append(ref_prompt_single)
+                    if args.use_abs_semantic_weight or args.use_normalized_semantic_weight:
+                        semantic_similarity = torch.bmm(ref_prompt_single/ref_prompt_single.norm(p=2,dim=-1,keepdim=True),target_embeds/target_embeds.norm(p=2,dim=1,keepdim=True)).squeeze()[None,...]
+                    else:   
+                        semantic_similarity = torch.ones(1, batch_size).to(device)
+                    semantic_similarity_list.append(semantic_similarity)
+                semantic_similarity_list = torch.stack(semantic_similarity_list)
+                
+                if args.use_normalized_semantic_weight:
+                    semantic_similarity_list = semantic_similarity_list/semantic_similarity_list.sum(dim=0,keepdim=True)*len(ref_obj)
+                    # print("semantic_similarity_list[:,0]",semantic_similarity_list[:,0])
+            else:
+                ref_diff,ref_prompt_single = get_ref_embed_helper(ref_obj)
+                if args.use_abs_semantic_weight:
+                    semantic_similarity = torch.bmm(ref_prompt_single/ref_prompt_single.norm(p=2,dim=-1,keepdim=True),target_embeds/target_embeds.norm(p=2,dim=1,keepdim=True)).squeeze()
+                else:   
+                    semantic_similarity = torch.ones(batch_size).to(device)
+            
+                # print("semantic_similarity",semantic_similarity)
         
         """
-            target_embeds: (bz, embed_dim)
+            target_embeds: (bz, embed_dim, 1)
             target_aug_embeds: (bz, num_class, embed_dim)
             ref_diff: (bz, num_class, embed_dim)
             ref_prompt_single: (bz, 1, embed_dim)
+            semantic_similarity: (bz)
+            semantic_similarity_list: (num_ref_objs,bz)
+
         """
 
-        if use_self_as_ref:
+        if args.use_self_as_ref:
             ref_embeds = text2embedding(target_obj_text,model,processor,device,normalize)[:,None,:]
             ref_aug_embeds = text2embedding(target_obj_aug_text,model,processor,device,normalize)
-            ref_aug_embeds = ref_aug_embeds[np.arange(batch_size * num_classes).reshape(num_classes,batch_size).T.flatten()].reshape(batch_size, num_classes, -1)
-
+            ref_aug_embeds = ref_aug_embeds[np.arange(batch_size * args.num_classes).reshape(args.num_classes,batch_size).T.flatten()].reshape(batch_size, args.num_classes, -1)
             ref_diff = ref_embeds - ref_aug_embeds
-            # print("ref_diff.shape",ref_diff.shape)
 
-        if use_only_number_word or use_self_as_ref:
-            # print("ref_diff.shape",ref_diff.shape)
-            # ref_diff_projection_2 = torch.bmm(ref_diff, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
-            ref_diff_projection_2 = (torch.sum(ref_diff*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
-            ref_diff = ref_diff - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-            if use_only_number_word and normalize_number_word and ref_obj is not None:
+        if args.use_only_number_word or args.use_self_as_ref:
+            ref_diff_projection_2 = proj_2_helper(ref_diff, target_embeds)
+            ref_diff = ref_diff - ref_diff_projection_2 #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+
+            if args.use_only_number_word and args.normalize_number_word and ref_obj is not None:
                 obj_ref_diff,obj_ref_prompt_single = get_ref_embed_helper(ref_obj)
-                obj_ref_diff_projection = (torch.bmm(obj_ref_diff, obj_ref_prompt_single.permute(0,2,1)) / torch.bmm(obj_ref_prompt_single, obj_ref_prompt_single.permute(0,2,1))) * obj_ref_prompt_single
-                # obj_ref_diff_projection_2 = torch.bmm(obj_ref_diff-obj_ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
-                obj_ref_diff_projection_2 = (torch.sum((obj_ref_diff-obj_ref_diff_projection)*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
-                obj_ref_diff = obj_ref_diff - obj_ref_diff_projection - obj_ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+                obj_ref_diff_projection = proj_1_helper(obj_ref_diff,obj_ref_prompt_single)
+                obj_ref_diff_projection_2 = proj_2_helper(obj_ref_diff-obj_ref_diff_projection,target_embeds)
+                obj_ref_diff = obj_ref_diff - obj_ref_diff_projection - obj_ref_diff_projection_2 #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
 
                 ref_diff = ref_diff * obj_ref_diff.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
-            # print("ref_diff.shape",ref_diff.shape)
-            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,factor,linear_shift,start_with_target_with_num)
+            
+            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
+        
         elif ref_obj is None:
-            # print("ref_obj is None")
             merged_text_embeds = target_aug_embeds
-        elif use_multi_objs:
+        
+        elif args.use_multi_objs:
             orth_ref_diff = 0
-            for ref_diff, ref_prompt_single in zip(ref_diff_list,ref_prompt_single_list):
-                ref_diff_projection = (torch.bmm(ref_diff, ref_prompt_single.permute(0,2,1)) / torch.bmm(ref_prompt_single, ref_prompt_single.permute(0,2,1))) * ref_prompt_single
-                # ref_diff_projection_2 = torch.bmm(ref_diff-ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
-                ref_diff_projection_2 = (torch.sum((ref_diff-ref_diff_projection)*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
-                orth_ref_diff += ref_diff - ref_diff_projection - ref_diff_projection_2#+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+            for ref_diff, ref_prompt_single,semantic_similarity in zip(ref_diff_list,ref_prompt_single_list,semantic_similarity_list):
+                ref_diff_projection = proj_1_helper(ref_diff,ref_prompt_single)
+                ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds)
+                orth_ref_diff += (ref_diff - ref_diff_projection - ref_diff_projection_2)*semantic_similarity.view(batch_size,1,1)#+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
                 del ref_diff,ref_prompt_single,ref_diff_projection,ref_diff_projection_2
-            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,orth_ref_diff/len(ref_obj),factor,linear_shift,start_with_target_with_num)
+            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,orth_ref_diff/len(ref_obj),args.factor,linear_shift,start_with_target_with_num)
+        
         else:
-            ref_diff_projection = (torch.bmm(ref_diff, ref_prompt_single.permute(0,2,1)) / torch.bmm(ref_prompt_single, ref_prompt_single.permute(0,2,1))) * ref_prompt_single
-            # ref_diff_projection_2 = torch.bmm(ref_diff-ref_diff_projection, target_embeds[...,None])/torch.sum(target_embeds * target_embeds, dim=-1, keepdim=True)[...,None]*target_embeds[:,None,:]
-            ref_diff_projection_2 = (torch.sum((ref_diff-ref_diff_projection)*target_aug_embeds, dim=-1, keepdim=True)/torch.sum(target_aug_embeds * target_aug_embeds, dim=-1, keepdim=True))*target_aug_embeds
+            ref_diff_projection = proj_1_helper(ref_diff,ref_prompt_single)
+            ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds)
 
-            ref_diff = ref_diff - ref_diff_projection - ref_diff_projection_2 #+ (1-factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,factor,linear_shift,start_with_target_with_num)
+            ref_diff = (ref_diff - ref_diff_projection - ref_diff_projection_2) * semantic_similarity.view(batch_size,1,1) #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
 
         merged_text_embeds=merged_text_embeds/merged_text_embeds.norm(p=2,dim=-1,keepdim=True)
-        _,logits_per_image= get_logits(model,merged_text_embeds,image_embeds.to(device)) # (bz,1,num_classes)
-        # print(merged_text_embeds.shape,image_embeds.shape)
-
-        # print(logits_per_image.shape,torch.argmax(logits_per_image,dim=-1).shape)
-        # predictions.extend((torch.argmax(logits_per_image,dim=-1).squeeze().detach().cpu().numpy()+2).tolist())
+        _,logits_per_image= get_logits(model,merged_text_embeds,image_embeds.to(device)) # (bz,1,args.num_classes)
         result = torch.argmax(logits_per_image,dim=-1).squeeze().detach().cpu().numpy()+2
         if isinstance(result, np.ndarray):
             predictions.extend(result.tolist())
@@ -334,22 +391,25 @@ def img_clf_countbench(
             predictions.append(result)
         gt_labels.extend(gt_count.tolist())
     
-    file_name = get_file_name(task_name, model_name, ref_obj, data_name="countbench", num_classes=num_classes, factor=factor, extension="pth")
-    print(f"Saving to {os.path.join(eval_dir,file_name)}")
-    acc = np.round((np.array(predictions)==np.array(gt_labels)).mean()*100,2)
-    print("acc",acc)
-    # with open(os.path.join(eval_dir,file_name), 'w') as f:
-    #     json.dump({
-    #         "predictions":predictions,
-    #         "gt_labels":gt_labels,
-    #         "acc":float(acc)
-    #     }, f)
-    with open(os.path.join(eval_dir,file_name), 'wb') as f:
-        pickle.dump({
-            "predictions":predictions,
-            "gt_labels":gt_labels,
-            "acc":float(acc)
-        }, f)
-
     
+    acc = np.round((np.array(predictions)==np.array(gt_labels)).mean()*100,2)
+    exp_results = {
+        "predictions":predictions,
+        "gt_labels":gt_labels,
+        "acc":float(acc)
+    }
 
+    # file_name = get_file_name(args.model, ref_obj, target_obj,data_name=args.dataset, num_classes=args.num_classes, extension="pth")
+    file_name = generate_file_path(configs,ext="pth")
+    save_path = os.path.join(args.root_folder,file_name)
+    print(f"Saving to {save_path}")
+    with open(save_path, 'wb') as f:
+        pickle.dump(exp_results, f)
+    
+    if not args.not_log_wandb:
+        wandb.log({f"acc":acc})
+        wandb.finish()
+    
+    print(f"Accuracy: {acc}%","Target object:",target_obj)
+
+    return exp_results
