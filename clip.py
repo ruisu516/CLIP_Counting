@@ -181,7 +181,9 @@ def generate_file_path(args,ext="pth"):
     # Construct a list of argument values, replacing any slashes in strings
     components = []
     for key, value in sorted(args.items()):
-        if key in ["root_folder","custom_data_path","processed_countbench_data_path","test_batch_size","random_seed","not_log_wandb"]:
+        if key in ["root_folder","custom_data_path","processed_countbench_data_path","test_batch_size","random_seed","not_log_wandb","trained_clip_path"]:
+            continue
+        if "train_" in key:
             continue
         if value is None:
             continue
@@ -197,6 +199,7 @@ def img_clf(
     model,
     processor,
     args,
+    number_shift_vectors=None,
     target_obj=None,
     ref_obj=None,
     normalize=False,
@@ -204,34 +207,6 @@ def img_clf(
     start_with_target_with_num=True,
     device="cuda",
 ):
-    configs = args.__dict__
-    configs["target_obj"] = target_obj
-    configs["normalize"] = normalize
-    configs["linear_shift"] = linear_shift
-    configs["start_with_target_with_num"] = start_with_target_with_num
-                    
-    
-    
-    if not args.not_log_wandb:
-        wandb.login(key = "f120e5e4c8c84329e87f496f85e6f7ded7732680")
-        api = wandb.Api()
-        runs = api.runs(path="ruisu/clip_count_new")
-        for run in runs:
-            config_matches = all(run.config.get(key) == value for key, value in configs.items())
-            if config_matches and run.state == "finished":
-                print(f"Run {run.id} matches the target configuration and is finished.")
-                return None
-
-        wandb.init(project="clip_count_new", config=configs, entity="ruisu")
-    print(configs)
-
-    use_target_aug_sent_with_context = not args.not_use_target_aug_sent_with_context
-
-    if args.use_arabic_nums:
-        number_words = ARABIC_NUMBER_WORDS[:args.num_classes]
-    else:
-        number_words = NUMBER_WORDS[:args.num_classes]
-
     def get_ref_embed_helper(ref_obj):
 
         if args.use_ref_with_context:
@@ -254,16 +229,87 @@ def img_clf(
             batch_first=True
         )
     
-    def proj_1_helper(op1,op2):
-        return (torch.bmm(op1, op2.permute(0,2,1)) / torch.bmm(op2, op2.permute(0,2,1))) * op2
+    def proj_1_helper(op1,op2,disable_ref_orth,device):
+        if disable_ref_orth:
+            return torch.zeros_like(op1).to(device)
+        else:
+            return (torch.bmm(op1, op2.permute(0,2,1)) / torch.bmm(op2, op2.permute(0,2,1))) * op2
 
-    def proj_2_helper(op1,op2):
+    def proj_2_helper(op1,op2,disable_target_orth,device):
         """
             op1: (bz, num_class, embed_dim)
             op2: (bz, embed_dim, 1)
         """
-        return torch.bmm(op1, op2)/torch.sum(op2 * op2, dim=1, keepdim=True)*op2.permute(0,2,1).repeat(1,args.num_classes,1)
+        if disable_target_orth:
+            return torch.zeros_like(op1).to(device)
+        else:
+            return torch.bmm(op1, op2)/torch.sum(op2 * op2, dim=1, keepdim=True)*op2.permute(0,2,1).repeat(1,args.num_classes,1)
 
+    def merge_helper_orth_once(ref_diff):
+        ref_diff_projection_2 = proj_2_helper(ref_diff, target_embeds,args.disable_target_orth,device)
+        ref_diff = ref_diff - ref_diff_projection_2 #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+
+        if args.use_only_number_word and args.normalize_number_word and ref_obj is not None:
+            obj_ref_diff,obj_ref_prompt_single = get_ref_embed_helper(ref_obj)
+            obj_ref_diff_projection = proj_1_helper(obj_ref_diff,obj_ref_prompt_single,args.disable_ref_orth,device)
+            obj_ref_diff_projection_2 = proj_2_helper(obj_ref_diff-obj_ref_diff_projection,target_embeds,args.disable_target_orth,device)
+            obj_ref_diff = obj_ref_diff - obj_ref_diff_projection - obj_ref_diff_projection_2 #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+
+            ref_diff = ref_diff * obj_ref_diff.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
+        
+        return apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
+    
+
+    def merge_helper_multi(ref_diff_list,ref_prompt_single_list,semantic_similarity_list):
+        orth_ref_diff = 0
+        for ref_diff, ref_prompt_single,semantic_similarity in zip(ref_diff_list,ref_prompt_single_list,semantic_similarity_list):
+            ref_diff_projection = proj_1_helper(ref_diff,ref_prompt_single,args.disable_ref_orth,device)
+            ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds,args.disable_target_orth,device)
+            orth_ref_diff += (ref_diff - ref_diff_projection - ref_diff_projection_2)*semantic_similarity.view(batch_size,1,1)#+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+            del ref_diff,ref_prompt_single,ref_diff_projection,ref_diff_projection_2
+        return apply_reff_diff(target_embeds,target_aug_embeds,orth_ref_diff/len(ref_obj),args.factor,linear_shift,start_with_target_with_num)
+    
+                
+    def merge_helper_orth_twice(ref_diff,ref_prompt_single,semantic_similarity):
+        ref_diff_projection = proj_1_helper(ref_diff,ref_prompt_single,args.disable_ref_orth,device)
+        ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds,args.disable_target_orth,device)
+
+        ref_diff = (ref_diff - ref_diff_projection - ref_diff_projection_2) * semantic_similarity.view(batch_size,1,1) #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
+        return apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
+
+
+    configs = args.__dict__
+    configs["target_obj"] = target_obj
+    configs["normalize"] = normalize
+    configs["linear_shift"] = linear_shift
+    configs["start_with_target_with_num"] = start_with_target_with_num
+    if not args.not_log_wandb:
+        wandb.login(key = "f120e5e4c8c84329e87f496f85e6f7ded7732680")
+        api = wandb.Api()
+        runs = api.runs(path="ruisu/clip_count_new")
+        for run in runs:
+            config_matches = all(run.config.get(key) == value for key, value in configs.items())
+            if config_matches and run.state == "finished":
+                print(f"Run {run.id} matches the target configuration and is finished.")
+                return None
+        
+        if args.load_trained_clip:
+            with open(os.path.join(args.trained_clip_path,"metadata.json"), 'r') as file:
+                train_configs = json.load(file)
+            for key in train_configs:
+                configs[f"train_{key}"] = train_configs[key]
+        
+        wandb.init(project="clip_count_new", config=configs, entity="ruisu")
+    print(configs)
+
+    use_target_aug_sent_with_context = not args.not_use_target_aug_sent_with_context
+
+    if args.use_arabic_nums:
+        number_words = ARABIC_NUMBER_WORDS[:args.num_classes]
+    else:
+        number_words = NUMBER_WORDS[:args.num_classes]
+
+    
     if "countbench" in args.dataset:
         dataset = ProcessedCountBenchDataset(
             data=target_data,
@@ -283,6 +329,16 @@ def img_clf(
     print("len(dataset)",len(dataset))
     dataloader = DataLoader(dataset, batch_size=args.test_batch_size, shuffle=False)
 
+    """
+        target_embeds: (bz, embed_dim, 1)
+        target_aug_embeds: (bz, num_class, embed_dim)
+        ref_diff: (bz, num_class, embed_dim)
+        ref_prompt_single: (bz, 1, embed_dim)
+        semantic_similarity: (bz)
+        semantic_similarity_list: (num_ref_objs,bz)
+
+    """
+    
     predictions = []
     gt_labels = []
     
@@ -303,12 +359,9 @@ def img_clf(
             model,processor,device,normalize
         )[np.arange(batch_size * args.num_classes).reshape(args.num_classes,batch_size).T.flatten()].reshape(batch_size, args.num_classes, -1)
         
-        if args.use_only_number_word:
-            #TODO
-            ref_aug_sentences=[f"{word}" for word in number_words]
-            ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize).unsqueeze(0).repeat(batch_size, 1, 1)
         if ref_obj is not None:
-            if args.use_multi_objs:
+            
+            if args.use_multi_objs: # 1.use_multi_objs
                 ref_diff_list,ref_prompt_single_list,semantic_similarity_list=[],[],[]
                 for r in ref_obj:
                     ref_diff,ref_prompt_single = get_ref_embed_helper(r)
@@ -323,65 +376,39 @@ def img_clf(
                 
                 if args.use_normalized_semantic_weight:
                     semantic_similarity_list = semantic_similarity_list/semantic_similarity_list.sum(dim=0,keepdim=True)*len(ref_obj)
-                    # print("semantic_similarity_list[:,0]",semantic_similarity_list[:,0])
-            else:
+                    # print("semantic_similarity_list[:,0]",semantic_similarity_list[:,0])        
+                merged_text_embeds = merge_helper_multi(ref_diff_list,ref_prompt_single_list,semantic_similarity_list)
+            
+            else: # 2. single ref obj
                 ref_diff,ref_prompt_single = get_ref_embed_helper(ref_obj)
                 if args.use_abs_semantic_weight:
                     semantic_similarity = torch.bmm(ref_prompt_single/ref_prompt_single.norm(p=2,dim=-1,keepdim=True),target_embeds/target_embeds.norm(p=2,dim=1,keepdim=True)).squeeze()
                 else:   
                     semantic_similarity = torch.ones(batch_size).to(device)
-            
-                # print("semantic_similarity",semantic_similarity)
-        
-        """
-            target_embeds: (bz, embed_dim, 1)
-            target_aug_embeds: (bz, num_class, embed_dim)
-            ref_diff: (bz, num_class, embed_dim)
-            ref_prompt_single: (bz, 1, embed_dim)
-            semantic_similarity: (bz)
-            semantic_similarity_list: (num_ref_objs,bz)
-
-        """
-
-        if args.use_self_as_ref:
-            ref_embeds = text2embedding(target_obj_text,model,processor,device,normalize)[:,None,:]
-            ref_aug_embeds = text2embedding(target_obj_aug_text,model,processor,device,normalize)
-            ref_aug_embeds = ref_aug_embeds[np.arange(batch_size * args.num_classes).reshape(args.num_classes,batch_size).T.flatten()].reshape(batch_size, args.num_classes, -1)
-            ref_diff = ref_embeds - ref_aug_embeds
-
-        if args.use_only_number_word or args.use_self_as_ref:
-            ref_diff_projection_2 = proj_2_helper(ref_diff, target_embeds)
-            ref_diff = ref_diff - ref_diff_projection_2 #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-
-            if args.use_only_number_word and args.normalize_number_word and ref_obj is not None:
-                obj_ref_diff,obj_ref_prompt_single = get_ref_embed_helper(ref_obj)
-                obj_ref_diff_projection = proj_1_helper(obj_ref_diff,obj_ref_prompt_single)
-                obj_ref_diff_projection_2 = proj_2_helper(obj_ref_diff-obj_ref_diff_projection,target_embeds)
-                obj_ref_diff = obj_ref_diff - obj_ref_diff_projection - obj_ref_diff_projection_2 #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-
-                ref_diff = ref_diff * obj_ref_diff.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
-            
-            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
-        
-        elif ref_obj is None:
-            merged_text_embeds = target_aug_embeds
-        
-        elif args.use_multi_objs:
-            orth_ref_diff = 0
-            for ref_diff, ref_prompt_single,semantic_similarity in zip(ref_diff_list,ref_prompt_single_list,semantic_similarity_list):
-                ref_diff_projection = proj_1_helper(ref_diff,ref_prompt_single)
-                ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds)
-                orth_ref_diff += (ref_diff - ref_diff_projection - ref_diff_projection_2)*semantic_similarity.view(batch_size,1,1)#+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-                del ref_diff,ref_prompt_single,ref_diff_projection,ref_diff_projection_2
-            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,orth_ref_diff/len(ref_obj),args.factor,linear_shift,start_with_target_with_num)
-        
+                merged_text_embeds = merge_helper_orth_twice(ref_diff,ref_prompt_single,semantic_similarity)
         else:
-            ref_diff_projection = proj_1_helper(ref_diff,ref_prompt_single)
-            ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds)
-
-            ref_diff = (ref_diff - ref_diff_projection - ref_diff_projection_2) * semantic_similarity.view(batch_size,1,1) #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-            merged_text_embeds = apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
-
+            if args.use_trained_linear_vector_as_ref and number_shift_vectors is not None: # 3. trained linear shift vector
+                ref_diff = number_shift_vectors.unsqueeze(0).repeat(batch_size, 1, 1)
+                semantic_similarity = torch.ones(batch_size).to(device)
+                # print(ref_diff.shape)
+                merged_text_embeds = merge_helper_orth_once(ref_diff)
+            
+            elif args.use_only_number_word: # 4. only number words
+                ref_aug_sentences=[f"{word}" for word in number_words]
+                ref_diff = text2embedding(ref_aug_sentences,model,processor,device,normalize).unsqueeze(0).repeat(batch_size, 1, 1)
+                merged_text_embeds = merge_helper_orth_once(ref_diff)
+            
+            elif args.use_self_as_ref: # 5. self as ref
+                ref_embeds = text2embedding(target_obj_text,model,processor,device,normalize)[:,None,:]
+                ref_aug_embeds = text2embedding(target_obj_aug_text,model,processor,device,normalize)
+                ref_aug_embeds = ref_aug_embeds[np.arange(batch_size * args.num_classes).reshape(args.num_classes,batch_size).T.flatten()].reshape(batch_size, args.num_classes, -1)
+                ref_diff = ref_embeds - ref_aug_embeds
+                merged_text_embeds = merge_helper_orth_once(ref_diff)
+            else: # 6. default
+                merged_text_embeds = target_aug_embeds
+            
+        
+        
         merged_text_embeds=merged_text_embeds/merged_text_embeds.norm(p=2,dim=-1,keepdim=True)
         _,logits_per_image= get_logits(model,merged_text_embeds,image_embeds.to(device)) # (bz,1,args.num_classes)
         result = torch.argmax(logits_per_image,dim=-1).squeeze().detach().cpu().numpy()+2

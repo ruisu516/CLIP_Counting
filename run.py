@@ -19,7 +19,8 @@ if __name__ == "__main__":
     parser.add_argument("--task",type=str,choices=["classification","image_retrievel","image_gen"],help="choose the task")
     
     parser.add_argument("--model",type=str,choices=["openai/clip-vit-base-patch32","openai/clip-vit-base-patch16","openai/clip-vit-large-patch14","stable_diffusion"],help="choose the model")
-    parser.add_argument("--trained_text_projection_path",default="",type=str)   
+    # parser.add_argument("--trained_text_projection_path",default="",type=str)   
+    parser.add_argument("--trained_clip_path",default="",type=str)   
     
     parser.add_argument("--test_batch_size",type=int,default=32) 
     parser.add_argument("--factor",type=float,default=1)   
@@ -28,7 +29,9 @@ if __name__ == "__main__":
     parser.add_argument("--ref_obj",type=str,default=None,help="name of the object being used as an reference")   
     parser.add_argument("--ref_obj_file",type=str,default=None,help="path to the ref objects")   
 
-    parser.add_argument('--load_trained_text_projection', action='store_true')
+
+    # parser.add_argument('--load_trained_text_projection', action='store_true')
+    parser.add_argument('--load_trained_clip', action='store_true')
     parser.add_argument("--normalize_number_word",action='store_true')   
     parser.add_argument('--not_use_target_aug_sent_with_context', action='store_true')
     parser.add_argument('--use_abs_semantic_weight', action='store_true')
@@ -41,12 +44,15 @@ if __name__ == "__main__":
     parser.add_argument('--use_self_as_ref', action='store_true')
     parser.add_argument('--use_target_obj_with_context', action='store_true')
     parser.add_argument('--not_log_wandb', action='store_true')
+    parser.add_argument('--use_trained_linear_vector_as_ref', action='store_true')
+    parser.add_argument('--disable_ref_orth', action='store_true')
+    parser.add_argument('--disable_target_orth', action='store_true')
 
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     
-    if args.ref_obj_file is not None:
+    if args.ref_obj_file is not None and args.use_multi_objs:
         with open(args.ref_obj_file, 'r') as file:
             ref_obj = file.readlines()
         ref_obj = [line.strip() for line in ref_obj]
@@ -71,9 +77,25 @@ if __name__ == "__main__":
     elif "clip" in args.model:
         model = CLIPModel.from_pretrained(args.model)
         processor = CLIPProcessor.from_pretrained(args.model)
-        if args.load_trained_text_projection:
-            print(f"Loading trained text projection from {args.trained_text_projection_path}")
-            model.text_projection.load_state_dict(torch.load(args.trained_text_projection_path))
+        number_shift_vectors=None
+        # if args.load_trained_text_projection:
+        #     print(f"Loading trained text projection from {args.trained_text_projection_path}")
+        #     model.text_projection.load_state_dict(torch.load(args.trained_text_projection_path))
+        if args.load_trained_clip:
+            model_dict = torch.load(os.path.join(args.trained_clip_path,"best_model.pth"))
+            if "number_shift_vectors" in model_dict.keys():
+                number_shift_vectors = model_dict["number_shift_vectors"]
+                del model_dict["number_shift_vectors"]
+            for key in list(model_dict.keys()):
+                if "clip_text_model." in key:
+                    model_dict[key.replace("clip_text_model.","")] = model_dict[key]
+                    del model_dict[key]
+                if "clip_text_projection." in key:
+                    model.text_projection.weight.data = model_dict[key]
+                    del model_dict[key]
+            model.text_model.load_state_dict(model_dict)
+            print(f"loading from {args.trained_clip_path}")
+        
         for name,param in model.named_parameters():
             param.requires_grad = False
         model = model.to(device)
@@ -103,6 +125,7 @@ if __name__ == "__main__":
                         processor=processor,
                         args=args,
                         target_obj=target_obj,
+                        number_shift_vectors=number_shift_vectors,
                         ref_obj=ref_obj,
                         device=device,
                     )
@@ -124,8 +147,15 @@ if __name__ == "__main__":
                 df.to_csv(save_path)
 
                 if not args.not_log_wandb:
+                    if args.load_trained_clip:
+                        with open(os.path.join(args.trained_clip_path,"metadata.json"), 'r') as file:
+                            train_configs = json.load(file)
+                        for key in train_configs:
+                            configs[f"train_{key}"] = train_configs[key]
+
                     wandb.init(project="clip_count_new", config=configs, entity="ruisu")
                     wandb.log({f"acc":all_exp_results["acc"][-1]})
+                    wandb.log({f"acc_per_obj":all_exp_results["acc"][:-1]})
                     wandb.finish()
                 
                     
@@ -135,6 +165,7 @@ if __name__ == "__main__":
                     model=model,
                     processor=processor,
                     args=args,
+                    number_shift_vectors=number_shift_vectors,
                     ref_obj=ref_obj,
                     device=device,
             )

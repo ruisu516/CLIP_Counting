@@ -5,11 +5,52 @@ from transformers import CLIPProcessor, CLIPModel
 import argparse
 from data_aug import data_augmentation
 from clip_count_utils import *
+from sklearn.model_selection import train_test_split
 
-class TextDataset(Dataset):
+class TextDatasetOnlineTrain(Dataset):
+    def __init__(self, data_path, processor, ratio=1,add_object_cf=False,ref_obj_file=None):
+    
+        self.true_texts, self.cf_texts, self.image_embeds, self.target_obj_texts, self.gt_label_idx, self.cf_label_idx = self.create_dataset_4class(data_path,ratio)
+
+        assert len(self.true_texts) == len(self.cf_texts) == self.image_embeds.shape[0]
+        self.processor = processor
+
+    def __len__(self):
+        return len(self.true_texts)
+
+    def __getitem__(self, idx):
+        gt_inputs = self.processor(text=[self.true_texts[idx]], images=None, return_tensors="pt", padding="max_length",  max_length=30, truncation=True)
+        cf_inputs = self.processor(text=[self.cf_texts[idx]], images=None, return_tensors="pt", padding="max_length",  max_length=30, truncation=True)
+        target_obj_inputs = self.processor(text=[self.target_obj_texts[idx]], images=None, return_tensors="pt", padding="max_length",  max_length=10, truncation=True)
+        
+        return gt_inputs, cf_inputs, self.image_embeds[idx], target_obj_inputs, torch.tensor(self.gt_label_idx[idx]).long(), torch.tensor(self.cf_label_idx[idx]).long()
+    
+
+    def create_dataset_4class(self,data_path,ratio=1):
+        data = torch.load(data_path)
+        if ratio < 1:
+            labels = [item["gt_count"] for item in data]
+            data, _, _, _ = train_test_split(data, labels, test_size=1-ratio, random_state=42, stratify=labels)
+
+        true_texts, cf_texts, image_embeds, target_obj_texts, gt_label_idx, cf_label_idx = [], [], [], [], [], []
+        for sample in data:
+            sample_cf_texts = sample["target_obj_aug_with_context_text"].copy()
+            sample_cf_texts.pop(sample["gt_count"]-2)
+            cf_texts += sample_cf_texts
+            true_texts += [sample["target_obj_aug_with_context_text"][sample["gt_count"]-2]] * len(sample_cf_texts)
+            image_embeds += [sample["image_embeds"].detach()]*len(sample_cf_texts)
+            target_obj_texts += [sample["target_obj_text"]]*len(sample_cf_texts)
+            gt_label_idx += [sample["gt_count"]-2]*len(sample_cf_texts)
+            sample_cf_label_idx = [0,1,2,3]
+            sample_cf_label_idx.pop(sample["gt_count"]-2)
+            cf_label_idx += sample_cf_label_idx
+
+        return true_texts, cf_texts, torch.cat(image_embeds, dim=0).detach().clone(), target_obj_texts, gt_label_idx, cf_label_idx
+
+class TextDatasetCustomDogs(Dataset):
     def __init__(self, data_path, ref, processor, clip_model, device, add_object_cf=False,ref_obj_file=None):
     
-        self.true_texts, self.cf_texts, self.image_embeds = self.create_dataset_two2five(
+        self.true_texts, self.cf_texts, self.image_embeds = self.create_dataset_4class(
             data_path, ref, processor, clip_model, device
         )
 
@@ -27,12 +68,13 @@ class TextDataset(Dataset):
         cf_inputs = {k:v.to(self.device) for k,v in cf_inputs.items()}
         return inputs, cf_inputs, self.image_embeds[idx]
     
-    def create_dataset_two2five(self,data_path, ref, processor, clip_model, device):
+    def create_dataset_4class(self,data_path, ref, processor, clip_model, device):
         with torch.no_grad():
             augmented_data = data_augmentation({ref:torch.load(data_path)})[ref]
 
-            true_texts, cf_texts, image_embeds = [], [], []
+            # true_texts, cf_texts, image_embeds = [], [], []
             number_words = ["two", "three", "four", "five"]
+            true_texts, cf_texts, image_embeds, target_obj_texts, gt_label_idx, cf_label_idx = [], [], [], [], [], []
             for idx, number_word in enumerate(number_words):
                 for sample in augmented_data[idx+2]:
                     pixel_values=processor(text=None, images=sample["img"], return_tensors="pt", padding=True)["pixel_values"].to(device) # torch.Size([1, 3, 224, 224])
@@ -41,14 +83,19 @@ class TextDataset(Dataset):
                     number_cf = number_words.copy()
                     number_cf.pop(idx)
                     cf_texts += [f"{ele} {ref}" for ele in number_cf]# torch.Size([3, 512])
+                    target_obj_texts += [f"{ref}"]*3
+                    gt_label_idx += [idx]*3
+                    sample_cf_label_idx = [0,1,2,3]
+                    sample_cf_label_idx.pop(idx)
+                    cf_label_idx += sample_cf_label_idx
 
-            return true_texts, cf_texts, torch.cat(image_embeds, dim=0).detach().clone()
+            return true_texts, cf_texts, torch.cat(image_embeds, dim=0).detach().clone(), target_obj_texts, gt_label_idx, cf_label_idx
 
 
 class TextEmbeddingDataset(Dataset):
     def __init__(self, data_path, ref, processor, clip_model, device, add_object_cf=False,ref_obj_file=None):
     
-        self.true_text_embeds, self.cf_text_embeds, self.image_embeds = self.create_dataset_two2five(
+        self.true_text_embeds, self.cf_text_embeds, self.image_embeds = self.create_dataset_4class(
             data_path, ref, processor, clip_model, device, add_object_cf,ref_obj_file
         )
         self.add_object_cf = add_object_cf
@@ -61,7 +108,7 @@ class TextEmbeddingDataset(Dataset):
     def __getitem__(self, idx):
         return self.true_text_embeds[idx], self.cf_text_embeds[idx], self.image_embeds[idx]
     
-    def create_dataset_two2five(self,data_path, ref, processor, clip_model, device, add_object_cf,ref_obj_file):
+    def create_dataset_4class(self,data_path, ref, processor, clip_model, device, add_object_cf,ref_obj_file):
         if add_object_cf:
             with open(ref_obj_file, 'r') as file:
                 other_ref_objs = file.readlines()
