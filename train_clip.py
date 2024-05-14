@@ -275,10 +275,10 @@ class Trainer:
             pbar.set_description(f'Epoch {epoch + 1}/{max_num_epochs}, Training Loss: {cumulative_train_loss / counter}, Val Loss: {avg_val_loss}')
             pbar.update(1)
 
-            if self.trained_epochs - best_ep > 10:
-                early_stopped = True
-                print("Early stopping")
-                break
+            # if self.trained_epochs - best_ep > 10 and self.trained_epochs > 30:
+            #     early_stopped = True
+            #     print("Early stopping")
+            #     break
 
         self.save_loss_logs()
         if not self.args.not_log_wandb:

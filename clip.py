@@ -310,7 +310,7 @@ def img_clf(
         number_words = NUMBER_WORDS[:args.num_classes]
 
     
-    if "countbench" in args.dataset:
+    if "countbench" in args.dataset or "coco-count" in args.dataset:
         dataset = ProcessedCountBenchDataset(
             data=target_data,
             device=device,
@@ -325,6 +325,7 @@ def img_clf(
             number_words=number_words,
             device=device,
         )
+
 
     print("len(dataset)",len(dataset))
     dataloader = DataLoader(dataset, batch_size=args.test_batch_size, shuffle=False)
@@ -427,11 +428,11 @@ def img_clf(
     }
 
     # file_name = get_file_name(args.model, ref_obj, target_obj,data_name=args.dataset, num_classes=args.num_classes, extension="pth")
-    file_name = generate_file_path(configs,ext="pth")
-    save_path = os.path.join(args.root_folder,file_name)
-    print(f"Saving to {save_path}")
-    with open(save_path, 'wb') as f:
-        pickle.dump(exp_results, f)
+    # file_name = generate_file_path(configs,ext="pth")
+    # save_path = os.path.join(args.root_folder,file_name)
+    # print(f"Saving to {save_path}")
+    # with open(save_path, 'wb') as f:
+    #     pickle.dump(exp_results, f)
     
     if not args.not_log_wandb:
         wandb.log({f"acc":acc})
