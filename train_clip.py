@@ -115,6 +115,7 @@ class Trainer:
         self.logit_scale = logit_scale
         self.train_number_shift_vectors = args.train_number_shift_vectors
         self.clip_config = clip_model.config
+        self.device=device
                
         trainable_parameters = []
         for name,param in clip_model.named_parameters():
@@ -161,8 +162,23 @@ class Trainer:
         # Extract the diagonal elements
         true_diag = torch.diag(logits_per_true_text)
         cf_diag = torch.diag(logits_per_cf_text)
-        
-        return torch.mean(torch.log(1 + torch.exp(cf_diag - true_diag)))
+        count_loss = torch.mean(torch.log(1 + torch.exp(cf_diag - true_diag)))
+
+        if self.args.add_object_cf:
+            # Step 2: Create a mask for the negative pairs
+            eye = torch.eye(logits_per_true_text.size(0)).bool().to(self.device)
+            negative_mask = ~eye  # Invert the identity matrix to get the negative mask
+            row_negative_logits = logits_per_true_text.masked_select(negative_mask).view(logits_per_true_text.size(0), -1) #(bz,bz-1)
+            row_positive_logits = true_diag.unsqueeze(1) #(bz,1)
+            row_obj_loss = torch.mean(torch.log(1 + torch.exp(row_negative_logits - row_positive_logits)))
+            
+            col_negative_logits = logits_per_true_text.t().masked_select(negative_mask).view(logits_per_true_text.size(0), -1) #(bz,bz-1)
+            col_positive_logits = true_diag.unsqueeze(1) #(bz,1)
+            col_obj_loss = torch.mean(torch.log(1 + torch.exp(col_negative_logits - col_positive_logits)))
+            
+            return count_loss + 0.5 * row_obj_loss + 0.5 * col_obj_loss
+        else:
+            return count_loss
 
     def val(self,eval_data_mode="val"):
         self.text_model.eval()
@@ -275,10 +291,10 @@ class Trainer:
             pbar.set_description(f'Epoch {epoch + 1}/{max_num_epochs}, Training Loss: {cumulative_train_loss / counter}, Val Loss: {avg_val_loss}')
             pbar.update(1)
 
-            # if self.trained_epochs - best_ep > 10 and self.trained_epochs > 30:
-            #     early_stopped = True
-            #     print("Early stopping")
-            #     break
+            if self.trained_epochs - best_ep > 10 and best_ep > 0:
+                early_stopped = True
+                print("Early stopping")
+                break
 
         self.save_loss_logs()
         if not self.args.not_log_wandb:
@@ -308,6 +324,7 @@ if __name__ == "__main__":
     parser.add_argument("--number_shift_vectors_init_weight_path",type=str,default=None)
     parser.add_argument("--save_root_folder",type=str)
     parser.add_argument('--add_object_cf', action='store_true')
+    parser.add_argument('--CLIP_loss', type=str,default="",choices=["both",""])
     parser.add_argument('--train_number_shift_vectors', action='store_true')
     parser.add_argument('--orthogonalize', action='store_true',help="orthogonalize the number shift vectors w.r.t. the target object") 
     parser.add_argument("--ref_obj_file",type=str,default=None,help="path to the ref objects")   
@@ -344,7 +361,7 @@ if __name__ == "__main__":
     
     print("trainable_parameters",args.trainable_parameters)
     trained_param_save_name = "_".join(args.trainable_parameters)
-    model_save_path = f"{args.save_root_folder}/{args.model.split('/')[1]}_{trained_param_save_name}{args.train_number_shift_vectors}{args.orthogonalize}_{args.lr}_{args.optimizer}{args.ref_obj}_{args.add_object_cf}"
+    model_save_path = f"{args.save_root_folder}/{args.model.split('/')[1]}_{trained_param_save_name}{args.train_number_shift_vectors}{args.orthogonalize}_{args.lr}_{args.optimizer}{args.ref_obj}_{args.add_object_cf}{args.CLIP_loss}"
     os.makedirs(model_save_path, exist_ok=True)
 
 

@@ -294,10 +294,14 @@ def img_clf(
                 return None
         
         if args.load_trained_clip:
-            with open(os.path.join(args.trained_clip_path,"metadata.json"), 'r') as file:
-                train_configs = json.load(file)
-            for key in train_configs:
-                configs[f"train_{key}"] = train_configs[key]
+            try:
+                with open(os.path.join(args.trained_clip_path,"metadata.json"), 'r') as file:
+                    train_configs = json.load(file)
+                for key in train_configs:
+                    configs[f"train_{key}"] = train_configs[key]
+            except:
+                print("Not find metadata")
+                pass
         
         wandb.init(project="clip_count_new", config=configs, entity="ruisu")
     print(configs)

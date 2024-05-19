@@ -13,7 +13,7 @@ if __name__ == "__main__":
 
     # Add arguments
     parser.add_argument("--root_folder",type=str,help="path to custom data")
-    parser.add_argument("--dataset",type=str,choices=["custom","countbench","coco-count-val"],help="choose from custom dataset or countbench")
+    parser.add_argument("--dataset",type=str,choices=["custom","countbench","coco-count-val","coco-count-test"],help="choose from custom dataset or countbench")
     parser.add_argument("--custom_data_path",type=str,help="path to custom data")
     parser.add_argument("--coco_eval_data_path",type=str,help="path to custom data")
     parser.add_argument("--processed_countbench_data_path",type=str,help="path to custom data")
@@ -171,7 +171,7 @@ if __name__ == "__main__":
                     device=device,
             )
         
-        elif (args.dataset=="coco-count-val") and (args.task == "classification"):
+        elif ("coco-count" in args.dataset) and (args.task == "classification"):
             img_clf(
                     target_data=torch.load(args.coco_eval_data_path,map_location=device),
                     model=model,
