@@ -37,75 +37,91 @@ def count_loss(logits_per_true_text, logits_per_cf_text, device="cuda", add_obje
         return count_loss
 
 class CustomCLIPModel(L.LightningModule):
-    def __init__(self, pretrained_checkpoint,number_shift_vectors=None,orthogonalize=True,device="cuda"):
+    def __init__(self, pretrained_checkpoint,args,device="cuda"):
         super(CustomCLIPModel, self).__init__()
         # TODO: load local pre-trained model
         clip_model = CLIPModel.from_pretrained(pretrained_checkpoint).to(device)
         self.clip_text_model = clip_model.text_model
         self.clip_text_projection = clip_model.text_projection
-        # self.clip_image_model = clip_model.image
-        self.number_shift_vectors = number_shift_vectors
-        self.orthogonalize = orthogonalize
-        self.clip_config =  clip_model.configs
+        if args.train_number_shift_vectors:
+            self.number_shift_vectors = number_shift_vectors
+        else:
+            self.number_shift_vectors = None
+        self.clip_config = clip_model.configs
         self.logit_scale = None # TODO:
         self.device = device
+        self.args = args
     
-    def forward_text_embedding(
+    def forward(
             self, 
-            input_ids, 
-            attention_mask, 
-            
+            gt_input_ids, 
+            true_attention_mask, 
+            gt_label_idx, #(bz,num_classes-1)
+            cf_input_ids, 
+            cf_attention_mask, 
+            cf_label_idx, #(bz,num_classes-1)
+            target_input_ids=None, 
+            target_attention_mask=None,
     ):
 
-        return self.clip_text_projection(
+        assert cf_label_idx.shape == gt_label_idx.shape
+        true_text_embeds = self.clip_text_projection(
             self.clip_text_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+                input_ids=gt_input_ids,
+                attention_mask=true_attention_mask,
                 position_ids=None,
                 output_attentions=self.clip_config.output_attentions,
                 output_hidden_states=self.clip_config.output_hidden_states,
                 return_dict=self.clip_config.use_return_dict,
             )[1]
         )#(bz,dim)
-    
-    def forward_orthogonalize(
-            self,
-            text_embeds,
-            target_input_ids = None, 
-            target_attention_mask = None,
-    ):
+        cf_text_embeds = self.clip_text_projection(
+            self.clip_text_model(
+                input_ids=cf_input_ids,
+                attention_mask=cf_attention_mask,
+                position_ids=None,
+                output_attentions=self.clip_config.output_attentions,
+                output_hidden_states=self.clip_config.output_hidden_states,
+                return_dict=self.clip_config.use_return_dict,
+            )[1]
+        ) #(bz,dim)
 
-        # if self.number_shift_vectors is not None:
-        if self.orthogonalize and target_input_ids is not None:
-            target_embeds = self.clip_text_projection(
-                self.clip_text_model(
-                    input_ids=target_input_ids,
-                    attention_mask=target_attention_mask,
-                    position_ids=None,
-                    output_attentions=self.clip_config.output_attentions,
-                    output_hidden_states=self.clip_config.output_hidden_states,
-                    return_dict=self.clip_config.use_return_dict,
-                )[1]
-            ) # (bz, dim)
-            #projection (num_classes,bz, dim)
-            projection = torch.matmul(target_embeds,self.number_shift_vectors.permute(1,0)).unsqueeze(-1) / torch.sum(target_embeds*target_embeds,dim=1).unsqueeze(-1).unsqueeze(-1) * target_embeds.unsqueeze(1).repeat(1,self.number_shift_vectors.shape[0],1) 
-            number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - projection #(bz,num_classes,dim)
-        else:
-            number_shift_vectors = self.number_shift_vectors.unsqueeze(0).repeat(text_embeds.shape[0],1,1) #(bz,num_classes,dim)
+        if self.number_shift_vectors is not None:
+            
+            if self.args.orthogonalize and target_input_ids is not None:
+                target_embeds = self.clip_text_projection(
+                    self.clip_text_model(
+                        input_ids=target_input_ids,
+                        attention_mask=target_attention_mask,
+                        position_ids=None,
+                        output_attentions=self.clip_config.output_attentions,
+                        output_hidden_states=self.clip_config.output_hidden_states,
+                        return_dict=self.clip_config.use_return_dict,
+                    )[1]
+                ) # (bz, dim)
+                #projection (num_classes,bz, dim)
+                projection = torch.matmul(target_embeds,self.number_shift_vectors.permute(1,0)).unsqueeze(-1) / torch.sum(target_embeds*target_embeds,dim=1).unsqueeze(-1).unsqueeze(-1) * target_embeds.unsqueeze(1).repeat(1,self.number_shift_vectors.shape[0],1) 
+                number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - projection #(bz,num_classes,dim)
+
+            else:
+                number_shift_vectors = self.number_shift_vectors.unsqueeze(0).repeat(true_text_embeds.shape[0],1,1) #(bz,num_classes,dim)
             
             
-        label_idx = label_idx.unsqueeze(-1)
-        batch_indices = torch.arange(text_embeds.shape[0]).unsqueeze(1).expand_as(label_idx)     
-        return text_embeds + number_shift_vectors[batch_indices,label_idx].squeeze()
-    #text_embeds / torch.norm(text_embeds, p=2, dim=-1, keepdim=True)
+            cf_label_idx,gt_label_idx = cf_label_idx.unsqueeze(-1),gt_label_idx.unsqueeze(-1)
+            cf_batch_indices = torch.arange(true_text_embeds.shape[0]).unsqueeze(1).expand_as(cf_label_idx)
+            true_text_embeds = true_text_embeds + number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze()
+            cf_text_embeds = cf_text_embeds + number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
+     
+        text_embeds = torch.concat([true_text_embeds, cf_text_embeds], dim=0) # (2*bz,dim)
+        return text_embeds / torch.norm(text_embeds, p=2, dim=-1, keepdim=True)
 
     def forward_step(self,batch,add_object_cf):
         gt_inputs, cf_inputs, image_embeds, target_obj_inputs, gt_label_idx, cf_label_idx = batch
         bs = image_embeds.shape[0]
 
         text_embeds = self.forward(
-            input_ids=gt_inputs["input_ids"].squeeze().to(device), 
-            attention_mask=gt_inputs["attention_mask"].squeeze().to(device), 
+            gt_input_ids=gt_inputs["input_ids"].squeeze().to(device), 
+            true_attention_mask=gt_inputs["attention_mask"].squeeze().to(device), 
             gt_label_idx=gt_label_idx.to(device),
             cf_input_ids=cf_inputs["input_ids"].squeeze().to(device), 
             cf_attention_mask=cf_inputs["attention_mask"].squeeze().to(device), 
@@ -132,12 +148,41 @@ class CustomCLIPModel(L.LightningModule):
         return loss
     
     def configure_optimizers(self):
-        # TODO: set up trainable params, choices of different params
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        return optimizer
-
-
+        trainable_parameters = []
+        if "text_model" in self.args.trainable_parameters:
+            for name,param in self.clip_text_model.named_parameters():
+                param.requires_grad = True
+                trainable_parameters.append(param)
+        else:
+            param.requires_grad = False
         
+        if "text_projection" in self.args.trainable_parameters:
+            for name,param in self.clip_text_projection.named_parameters():
+                param.requires_grad = True
+                trainable_parameters.append(param)
+        else:
+            param.requires_grad = False
+        
+        if self.train_number_shift_vectors:
+            if args.number_shift_vectors_init_weight_path is not None:
+                print("loading number_shift_vectors from",args.number_shift_vectors_init_weight_path)
+                loaded_tensor = torch.load(args.number_shift_vectors_init_weight_path).to(device)
+                loaded_tensor.requires_grad_(True)
+                number_shift_vectors = torch.nn.Parameter(loaded_tensor)
+            else:
+                torch.manual_seed(42)
+                number_shift_vectors = torch.nn.Parameter(torch.randn(args.num_classes, self.clip_config.projection_dim).to(device))
+
+            trainable_parameters.append(number_shift_vectors)
+        else:
+            number_shift_vectors = None
+        print("len(trainable_parameters)",len(trainable_parameters))
+
+        if self.args.optimizer == "SGD":
+            optimizer = torch.optim.SGD(trainable_parameters, lr=self.args.lr)
+        elif self.args.optimizer == "Adam":
+            optimizer = torch.optim.Adam(trainable_parameters, lr=self.args.lr)
+        return optimizer
 
 
 def save_metadata(args, filename='metadata.json'):
@@ -168,48 +213,14 @@ def get_image_embeds(model,pixel_values,device="cpu"):
 #         self.clip_config = clip_model.config
 #         self.device=device
                
-#         trainable_parameters = []
-#         for name,param in clip_model.named_parameters():
-#             if any([ele in name for ele in self.args.trainable_parameters]):
-#                 param.requires_grad = True
-#                 trainable_parameters.append(param)
-#             else:
-#                 param.requires_grad = False
-        
-#         if self.train_number_shift_vectors:
-#                        # number_shift_vectors.requires_grad = True
-#             if args.number_shift_vectors_init_weight_path is not None:
-#                 print("loading number_shift_vectors from",args.number_shift_vectors_init_weight_path)
-#                 loaded_tensor = torch.load(args.number_shift_vectors_init_weight_path).to(device)
-#                 loaded_tensor.requires_grad_(True)
-#                 number_shift_vectors = torch.nn.Parameter(loaded_tensor)
-#                 # number_shift_vectors = torch.nn.Parameter(torch.load(args.number_shift_vectors_init_weight_path).to(device))
-#             else:
-#                 torch.manual_seed(42)
-#                 number_shift_vectors = torch.nn.Parameter(torch.randn(args.num_classes, self.clip_config.projection_dim).to(device))
-
-#             # number_shift_vectors = number_shift_vectors.to(device)
-#             trainable_parameters.append(number_shift_vectors)
-#         else:
-#             number_shift_vectors = None
-#         self.text_model = CustomCLIPModel(self.clip_config,clip_model.text_model.to(device), clip_model.text_projection.to(device), number_shift_vectors,args.orthogonalize)
-
-#         print("len(trainable_parameters)",len(trainable_parameters))
-#         if self.args.optimizer == "SGD":
-#             self.optimizer = torch.optim.SGD(trainable_parameters, lr=self.args.lr)
-#         elif self.args.optimizer == "Adam":
-#             self.optimizer = torch.optim.Adam(trainable_parameters, lr=self.args.lr)
+#         
         
 #         self.training_losses = {}
 #         self.validation_losses = {}
 #         self.trained_epochs = 0
 #         self.model_save_path = model_save_path
 
-#     # def count_loss(self, logits_per_true_text, logits_per_cf_text):
-#     #     # return -torch.mean(torch.log(torch.exp(logits_per_true_text) / (torch.exp(logits_per_true_text) + torch.exp(logits_per_cf_text))))
-#     #     return torch.mean(torch.log(1+torch.exp(logits_per_cf_text-logits_per_true_text)))
-        
-    
+
 
 #     def val(self,eval_data_mode="val"):
 #         self.text_model.eval()
@@ -380,13 +391,10 @@ if __name__ == "__main__":
     if args.ref_obj == "dogs":
         dataset = TextDatasetCustomDogs(args.train_data_path, args.ref_obj, processor, clip_model, device, add_object_cf=args.add_object_cf,ref_obj_file=args.ref_obj_file)
         dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-
-        # val_dataset = TextDatasetCustomDogs(args.eval_data_path, args.ref_obj, processor, clip_model, device, add_object_cf=args.add_object_cf,ref_obj_file=args.ref_obj_file)
-        # val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
     elif args.ref_obj is None:
-        dataset = TextDatasetOnlineTrain(args.train_data_path,processor,ratio=args.train_ratio)
+        dataset = TextDatasetOnlineTrain(args.train_data_path,processor,num_classes=args.num_classes,ratio=args.train_ratio)
         dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-    val_dataset = TextDatasetOnlineTrain(args.eval_data_path, processor)
+    val_dataset = TextDatasetOnlineTrain(args.eval_data_path, processor,num_classes=args.num_classes)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
 
@@ -408,7 +416,11 @@ if __name__ == "__main__":
     wandb_logger = WandbLogger(project="train_clip_count", entity="ruisu")
 
     # sets seeds for numpy, torch and python.random.
-    model = Model()
+    model = CustomCLIPModel(
+        pretrained_checkpoint=args.model,
+        args=args,
+        device=device
+    )
     callbacks = None
     trainer = Trainer(
         deterministic=True,
@@ -416,7 +428,7 @@ if __name__ == "__main__":
         callbacks=callbacks,
         check_val_every_n_epoch=1,
         log_every_n_steps=50,
-        logger=logger,
+        logger=wandb_logger,
         max_epochs=500,
         min_epochs=1,
         profiler="simple", # to profile standard training events, equivalent to `profiler=SimpleProfiler()`
@@ -425,9 +437,9 @@ if __name__ == "__main__":
     
     trainer.fit(model, dataloader, val_dataloader)
 
-    trainer.train(args.num_epochs)
-    args_dict = vars(args)
+    # trainer.train(args.num_epochs)
+    # args_dict = vars(args)
     
-    # Save the dictionary as a JSON file
-    save_metadata(args_dict,filename=os.path.join(model_save_path, 'metadata.json'))
+    # # Save the dictionary as a JSON file
+    # save_metadata(args_dict,filename=os.path.join(model_save_path, 'metadata.json'))
 
