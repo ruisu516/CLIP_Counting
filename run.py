@@ -48,6 +48,9 @@ if __name__ == "__main__":
     parser.add_argument('--use_trained_linear_vector_as_ref', action='store_true')
     parser.add_argument('--disable_ref_orth', action='store_true')
     parser.add_argument('--disable_target_orth', action='store_true')
+    parser.add_argument('--ablation_proj_to_target_aug_embeds', action='store_true')
+    parser.add_argument('--ablation_add_to_target_embeds', action='store_true')
+
 
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"

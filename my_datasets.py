@@ -3,14 +3,16 @@ from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 from transformers import CLIPProcessor, CLIPModel
 import argparse
+import numpy as np
 from data_aug import data_augmentation
 from clip_count_utils import *
 from sklearn.model_selection import train_test_split
 
 class TextDatasetOnlineTrain(Dataset):
-    def __init__(self, data_path, processor, ratio=1,add_object_cf=False,ref_obj_file=None):
+    def __init__(self, data_path, processor, num_classes=4, ratio=1,add_object_cf=False,ref_obj_file=None):
+        self.num_classes = num_classes
     
-        self.true_texts, self.cf_texts, self.image_embeds, self.target_obj_texts, self.gt_label_idx, self.cf_label_idx = self.create_dataset_4class(data_path,ratio)
+        self.true_texts, self.cf_texts, self.image_embeds, self.target_obj_texts, self.gt_label_idx, self.cf_label_idx = self.create_dataset(data_path,ratio)
 
         assert len(self.true_texts) == len(self.cf_texts) == self.image_embeds.shape[0]
         self.processor = processor
@@ -26,7 +28,7 @@ class TextDatasetOnlineTrain(Dataset):
         return gt_inputs, cf_inputs, self.image_embeds[idx], target_obj_inputs, torch.tensor(self.gt_label_idx[idx]).long(), torch.tensor(self.cf_label_idx[idx]).long()
     
 
-    def create_dataset_4class(self,data_path,ratio=1):
+    def create_dataset(self,data_path,ratio=1):
         data = torch.load(data_path)
         if ratio < 1:
             labels = [item["gt_count"] for item in data]
@@ -41,16 +43,22 @@ class TextDatasetOnlineTrain(Dataset):
             image_embeds += [sample["image_embeds"].detach()]*len(sample_cf_texts)
             target_obj_texts += [sample["target_obj_text"]]*len(sample_cf_texts)
             gt_label_idx += [sample["gt_count"]-2]*len(sample_cf_texts)
-            sample_cf_label_idx = [0,1,2,3]
+            sample_cf_label_idx = np.arange(0,self.num_classes).tolist()
+            # try:
             sample_cf_label_idx.pop(sample["gt_count"]-2)
+            # except:
+            #     print("IndexError: pop index out of range")
+            #     print(sample_cf_label_idx,sample["gt_count"])
+            #     exit()
             cf_label_idx += sample_cf_label_idx
 
         return true_texts, cf_texts, torch.cat(image_embeds, dim=0).detach().clone(), target_obj_texts, gt_label_idx, cf_label_idx
 
-class TextDatasetOnlineTrain(Dataset):
-    def __init__(self, data_path, processor, ratio=1,add_object_cf=False,ref_obj_file=None):
-    
-        self.true_texts, self.cf_texts, self.image_embeds, self.target_obj_texts, self.gt_label_idx, self.cf_label_idx = self.create_dataset_4class(data_path,ratio)
+class TextDatasetOnlineTrainContrastive(Dataset):
+    def __init__(self, data_path, processor, num_classes=4, ratio=1,add_object_cf=False,ref_obj_file=None):
+        self.num_classes = num_classes
+
+        self.true_texts, self.cf_texts, self.image_embeds, self.target_obj_texts, self.gt_label_idx, self.cf_label_idx = self.create_dataset(data_path,ratio)
 
         assert len(self.true_texts) == len(self.cf_texts) == self.image_embeds.shape[0]
         self.processor = processor
@@ -59,33 +67,42 @@ class TextDatasetOnlineTrain(Dataset):
         return len(self.true_texts)
 
     def __getitem__(self, idx):
-        gt_inputs = self.processor(text=[self.true_texts[idx]], images=None, return_tensors="pt", padding="max_length",  max_length=30, truncation=True)
-        cf_inputs = self.processor(text=[self.cf_texts[idx]], images=None, return_tensors="pt", padding="max_length",  max_length=30, truncation=True)
-        target_obj_inputs = self.processor(text=[self.target_obj_texts[idx]], images=None, return_tensors="pt", padding="max_length",  max_length=10, truncation=True)
-        
-        return gt_inputs, cf_inputs, self.image_embeds[idx], target_obj_inputs, torch.tensor(self.gt_label_idx[idx]).long(), torch.tensor(self.cf_label_idx[idx]).long()
-    
+        gt_inputs = self.processor(text=self.true_texts[idx], images=None, return_tensors="pt", padding="max_length",  max_length=30, truncation=True)
+        cf_inputs = self.processor(text=self.cf_texts[idx], images=None, return_tensors="pt", padding="max_length",  max_length=30, truncation=True)
+        target_obj_inputs = self.processor(text=self.target_obj_texts[idx], images=None, return_tensors="pt", padding="max_length",  max_length=10, truncation=True)
 
-    def create_dataset_4class(self,data_path,ratio=1):
+        # torch.Size([8, 30]), torch.Size([8, 30]), torch.Size([8, 512])
+        return gt_inputs, cf_inputs, self.image_embeds[idx], target_obj_inputs, torch.tensor(self.gt_label_idx[idx]).long(), torch.tensor(self.cf_label_idx[idx]).long()
+
+
+    def create_dataset(self,data_path,ratio=1):
         data = torch.load(data_path)
         if ratio < 1:
             labels = [item["gt_count"] for item in data]
             data, _, _, _ = train_test_split(data, labels, test_size=1-ratio, random_state=42, stratify=labels)
 
         true_texts, cf_texts, image_embeds, target_obj_texts, gt_label_idx, cf_label_idx = [], [], [], [], [], []
+
         for sample in data:
             sample_cf_texts = sample["target_obj_aug_with_context_text"].copy()
             sample_cf_texts.pop(sample["gt_count"]-2)
-            cf_texts += sample_cf_texts
-            true_texts += [sample["target_obj_aug_with_context_text"][sample["gt_count"]-2]] * len(sample_cf_texts)
-            image_embeds += [sample["image_embeds"].detach()]*len(sample_cf_texts)
-            target_obj_texts += [sample["target_obj_text"]]*len(sample_cf_texts)
-            gt_label_idx += [sample["gt_count"]-2]*len(sample_cf_texts)
-            sample_cf_label_idx = [0,1,2,3]
+            cf_texts.append(sample_cf_texts)
+            true_texts.append(sample["target_obj_aug_with_context_text"][sample["gt_count"]-2])
+            image_embeds.append(sample["image_embeds"].detach().unsqueeze(0))
+            target_obj_texts.append(sample["target_obj_text"])
+            gt_label_idx.append(sample["gt_count"]-2)
+            sample_cf_label_idx = np.arange(0,self.num_classes).tolist()
+            # try:
             sample_cf_label_idx.pop(sample["gt_count"]-2)
-            cf_label_idx += sample_cf_label_idx
+            # except:
+            #     print("IndexError: pop index out of range")
+            #     print(sample_cf_label_idx,sample["gt_count"])
+            #     exit()
+            cf_label_idx.append(sample_cf_label_idx)
 
+        # print(image_embeds[0].shape)
         return true_texts, cf_texts, torch.cat(image_embeds, dim=0).detach().clone(), target_obj_texts, gt_label_idx, cf_label_idx
+
 
 class TextDatasetCustomDogs(Dataset):
     def __init__(self, data_path, ref, processor, clip_model, device, add_object_cf=False,ref_obj_file=None):

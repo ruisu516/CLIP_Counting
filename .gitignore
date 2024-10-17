@@ -7,3 +7,6 @@
 
 countbench_scripts/
 train_clip_scripts/
+process_dataset/
+wandb/
+wandb_downloads/

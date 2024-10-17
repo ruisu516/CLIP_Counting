@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader,WeightedRandomSampler, Subset
 from transformers import CLIPProcessor, CLIPModel
 import argparse
 from data_aug import data_augmentation
-from my_datasets import TextDatasetCustomDogs,TextDatasetOnlineTrain
+from my_datasets import TextDatasetCustomDogs,TextDatasetOnlineTrain,TextDatasetOnlineTrainContrastive
 
 import torch
 import torch.nn as nn
@@ -12,7 +12,7 @@ from transformers import CLIPTextModel
 import wandb
 import numpy as np
 
-class CustomCLIPModel(nn.Module):
+class CustomCLIPModel(torch.nn.Module):
     def __init__(self, clip_config, clip_text_model, clip_text_projection,number_shift_vectors=None,orthogonalize=True,ablation_proj_to_target_aug_embeds=False,ablation_add_to_target_embeds=False):
         super(CustomCLIPModel, self).__init__()
         self.clip_text_model = clip_text_model
@@ -37,8 +37,8 @@ class CustomCLIPModel(nn.Module):
             target_input_ids=None, 
             target_attention_mask=None,
     ):
-
-        assert cf_label_idx.shape == gt_label_idx.shape
+        # assert cf_label_idx.shape == gt_label_idx.shape
+        bs,num_cf = gt_input_ids.shape[0], int(cf_input_ids.shape[0]/gt_input_ids.shape[0])
         true_text_embeds = self.clip_text_projection(
             self.clip_text_model(
                 input_ids=gt_input_ids,
@@ -58,7 +58,7 @@ class CustomCLIPModel(nn.Module):
                 output_hidden_states=self.clip_config.output_hidden_states,
                 return_dict=self.clip_config.use_return_dict,
             )[1]
-        ) #(bz,dim)
+        ) #(bz*clf,dim)
 
         if self.number_shift_vectors is not None:
             target_embeds = self.clip_text_projection(
@@ -75,37 +75,30 @@ class CustomCLIPModel(nn.Module):
             if self.orthogonalize:
                 if self.ablation_proj_to_target_aug_embeds:
                     gt_projection = self.projection_helper(true_text_embeds,self.number_shift_vectors)
-                    gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - gt_projection #(bz,num_classes,dim)
+                    gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - gt_projection #(bz,dim)
+                    
                     cf_projection = self.projection_helper(cf_text_embeds,self.number_shift_vectors)
-                    cf_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - cf_projection #(bz,num_classes,dim)
+                    cf_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - cf_projection #(bz,dim)
                 
                 else:
-                    #projection (num_classes,bz, dim)
                     projection = self.projection_helper(target_embeds,self.number_shift_vectors)
                     gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - projection #(bz,num_classes,dim)
-                    cf_number_shift_vectors = gt_number_shift_vectors
+                    cf_number_shift_vectors = gt_number_shift_vectors.unsqueeze(1).expand(-1,num_cf,-1,-1).reshape(bs*num_cf,gt_number_shift_vectors.shape[-2],gt_number_shift_vectors.shape[-1])
             else:
-                gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0).repeat(true_text_embeds.shape[0],1,1) #(bz,num_classes,dim)
-                cf_number_shift_vectors = gt_number_shift_vectors
+                gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0).expand(true_text_embeds.shape[0],-1,-1) #(bz,num_classes,dim)
+                cf_number_shift_vectors = gt_number_shift_vectors.unsqueeze(1).expand(-1,num_cf,-1,-1).view(bs*num_cf,1,-1,-1).unsqueeze()
             
-            
-            
-            cf_label_idx,gt_label_idx = cf_label_idx.unsqueeze(-1),gt_label_idx.unsqueeze(-1)
-            cf_batch_indices = torch.arange(true_text_embeds.shape[0]).unsqueeze(1).expand_as(cf_label_idx)
-            # print(cf_batch_indices.shape,number_shift_vectors.shape,gt_label_idx.shape)
-            # print(number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze().shape,true_text_embeds.shape)
-            if self.ablation_add_to_target_embeds:
-                true_text_embeds = target_embeds + gt_number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze()
-                cf_text_embeds = target_embeds + cf_number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
-            else:
-                true_text_embeds = true_text_embeds + gt_number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze()
-                cf_text_embeds = cf_text_embeds + cf_number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
-            # true_text_embeds = true_text_embeds + number_shift_vectors[gt_label_idx]
-            # cf_text_embeds = cf_text_embeds + number_shift_vectors[cf_label_idx]
 
-                
-        text_embeds = torch.concat([true_text_embeds, cf_text_embeds], dim=0) # (2*bz,dim)
-        return text_embeds / torch.norm(text_embeds, p=2, dim=-1, keepdim=True)
+            gt_batch_indices = torch.arange(bs).unsqueeze(1).expand_as(gt_label_idx)
+            cf_batch_indices = torch.arange(bs*num_cf).unsqueeze(1).expand_as(cf_label_idx)
+            if self.ablation_add_to_target_embeds:
+                true_text_embeds = target_embeds + gt_number_shift_vectors[gt_batch_indices,gt_label_idx].squeeze()
+                cf_text_embeds = target_embeds.unsqueeze(1).expand(-1,num_cf,-1).reshape(bs*num_cf,target_embeds.shape[-1])+ cf_number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
+            else:
+                true_text_embeds = true_text_embeds + gt_number_shift_vectors[gt_batch_indices,gt_label_idx].squeeze()
+                cf_text_embeds = cf_text_embeds + cf_number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
+        cf_text_embeds = cf_text_embeds.unsqueeze(1).view(true_text_embeds.shape[0],-1,true_text_embeds.shape[-1]) # (bz,num_cf,dim)
+        return true_text_embeds / torch.norm(true_text_embeds, p=2, dim=-1, keepdim=True), cf_text_embeds / torch.norm(cf_text_embeds, p=2, dim=-1, keepdim=True)
 
 def save_metadata(args, filename='metadata.json'):
     """Save the parsed arguments to a JSON file."""
@@ -125,49 +118,6 @@ def get_image_embeds(model,pixel_values,device="cpu"):
 
     return image_embeds
 
-def count_loss(logits_per_true_text, logits_per_cf_text,):
-    # Extract the diagonal elements
-    true_diag = torch.diag(logits_per_true_text)
-    cf_diag = torch.diag(logits_per_cf_text)
-    count_loss = torch.mean(torch.log(1 + torch.exp(cf_diag - true_diag)))
-
-    if self.args.add_object_cf:
-        # Step 2: Create a mask for the negative pairs
-        eye = torch.eye(logits_per_true_text.size(0)).bool().to(self.device)
-        negative_mask = ~eye  # Invert the identity matrix to get the negative mask
-        row_negative_logits = logits_per_true_text.masked_select(negative_mask).view(logits_per_true_text.size(0), -1) #(bz,bz-1)
-        row_positive_logits = true_diag.unsqueeze(1) #(bz,1)
-        row_obj_loss = torch.mean(torch.log(1 + torch.exp(row_negative_logits - row_positive_logits)))
-        
-        col_negative_logits = logits_per_true_text.t().masked_select(negative_mask).view(logits_per_true_text.size(0), -1) #(bz,bz-1)
-        col_positive_logits = true_diag.unsqueeze(1) #(bz,1)
-        col_obj_loss = torch.mean(torch.log(1 + torch.exp(col_negative_logits - col_positive_logits)))
-        
-        return count_loss + 0.5 * row_obj_loss + 0.5 * col_obj_loss
-    else:
-        return count_loss
-
-def count_loss(logits_per_true_text, logits_per_cf_text):
-    # Extract the diagonal elements
-    true_diag = torch.diag(logits_per_true_text)
-    cf_diag = torch.diag(logits_per_cf_text)
-    count_loss = torch.mean(torch.log(1 + torch.exp(cf_diag - true_diag)))
-
-    if self.args.add_object_cf:
-        # Step 2: Create a mask for the negative pairs
-        eye = torch.eye(logits_per_true_text.size(0)).bool().to(self.device)
-        negative_mask = ~eye  # Invert the identity matrix to get the negative mask
-        row_negative_logits = logits_per_true_text.masked_select(negative_mask).view(logits_per_true_text.size(0), -1) #(bz,bz-1)
-        row_positive_logits = true_diag.unsqueeze(1) #(bz,1)
-        row_obj_loss = torch.mean(torch.log(1 + torch.exp(row_negative_logits - row_positive_logits)))
-        
-        col_negative_logits = logits_per_true_text.t().masked_select(negative_mask).view(logits_per_true_text.size(0), -1) #(bz,bz-1)
-        col_positive_logits = true_diag.unsqueeze(1) #(bz,1)
-        col_obj_loss = torch.mean(torch.log(1 + torch.exp(col_negative_logits - col_positive_logits)))
-        
-        return count_loss + 0.5 * row_obj_loss + 0.5 * col_obj_loss
-    else:
-        return count_loss
 
 class Trainer:
     def __init__(self, dataloader, val_dataloader, clip_model, logit_scale, model_save_path, args,device="cuda"):
@@ -224,10 +174,15 @@ class Trainer:
     #     return torch.mean(torch.log(1+torch.exp(logits_per_cf_text-logits_per_true_text)))
         
     def count_loss(self, logits_per_true_text, logits_per_cf_text):
+        # logits_per_true_text: (bz,bz)
+        # logits_per_cf_text: (bz,num_cf)
         # Extract the diagonal elements
-        true_diag = torch.diag(logits_per_true_text)
-        cf_diag = torch.diag(logits_per_cf_text)
-        count_loss = torch.mean(torch.log(1 + torch.exp(cf_diag - true_diag)))
+        true_diag = torch.diag(logits_per_true_text).unsqueeze(-1) #(bz,1)
+        
+        # indices = torch.arange(logits_per_cf_text.shape[1])
+        # cf_diag = logits_per_cf_text[:, indices, indices].permute(1,0)# (bz,num_cf)
+
+        count_loss = torch.mean(torch.log(1 + torch.exp(logits_per_cf_text - true_diag).sum(dim=1)))
 
         if self.args.add_object_cf:
             # Step 2: Create a mask for the negative pairs
@@ -258,20 +213,26 @@ class Trainer:
             total_samples = 0
             for gt_inputs, cf_inputs, image_embeds, target_obj_inputs, gt_label_idx, cf_label_idx in loader:
                 bs = image_embeds.shape[0]
+                num_cf  = cf_inputs["input_ids"].shape[1]
 
-                text_embeds = self.text_model(
-                    gt_input_ids=gt_inputs["input_ids"].squeeze().to(self.device), 
-                    true_attention_mask=gt_inputs["attention_mask"].squeeze().to(self.device), 
-                    gt_label_idx=gt_label_idx.to(self.device),
-                    cf_input_ids=cf_inputs["input_ids"].squeeze().to(self.device), 
-                    cf_attention_mask=cf_inputs["attention_mask"].squeeze().to(self.device), 
-                    cf_label_idx=cf_label_idx.to(self.device),
-                    target_input_ids=target_obj_inputs["input_ids"].squeeze().to(self.device), 
+                true_text_embeds, cf_text_embeds = self.text_model(
+                    gt_input_ids=gt_inputs["input_ids"].squeeze().to(self.device),
+                    true_attention_mask=gt_inputs["attention_mask"].squeeze().to(self.device),
+                    gt_label_idx=gt_label_idx.unsqueeze(-1).to(self.device),
+
+                    cf_input_ids=cf_inputs["input_ids"].squeeze().view(bs*num_cf,-1).to(self.device),
+                    cf_attention_mask=cf_inputs["attention_mask"].squeeze().view(bs*num_cf,-1).to(self.device),
+                    cf_label_idx=cf_label_idx.view(bs*num_cf,-1).to(self.device),
+
+                    target_input_ids=target_obj_inputs["input_ids"].squeeze().to(self.device),
                     target_attention_mask=target_obj_inputs["attention_mask"].squeeze().to(self.device),
-                )
+                ) # (bz,dim), (bz,num_cf,dim)
+                
+                logits_per_true_text = torch.matmul(true_text_embeds, image_embeds.detach().squeeze().t().to(self.device))\
+                    * self.logit_scale # (bz,bz)
+                # logits_per_cf_text = torch.matmul(cf_text_embeds, image_embeds.squeeze().detach().to(self.device).t()).view(bs,num_cf,-1).permute(1,0,2) * self.logit_scale # (num_cf,bz,bz)
+                logits_per_cf_text = torch.bmm(cf_text_embeds, image_embeds.detach().to(device).permute(0,2,1)).squeeze() * self.logit_scale # (bz,num_cf)
 
-                logits_per_text = torch.matmul(text_embeds, image_embeds.detach().t().to(self.device)) * self.logit_scale
-                logits_per_true_text, logits_per_cf_text = logits_per_text[:bs], logits_per_text[bs:]
 
                 loss = self.count_loss(logits_per_true_text, logits_per_cf_text)
                 total_loss += loss.item() * bs
@@ -311,21 +272,28 @@ class Trainer:
             counter = 0
             for gt_inputs, cf_inputs, image_embeds, target_obj_inputs, gt_label_idx, cf_label_idx in self.dataloader:
                 bs = image_embeds.shape[0]
+                num_cf  = cf_inputs["input_ids"].shape[1]
                 self.text_model.zero_grad()
 
-                text_embeds = self.text_model(
-                    gt_input_ids=gt_inputs["input_ids"].squeeze().to(self.device), 
-                    true_attention_mask=gt_inputs["attention_mask"].squeeze().to(self.device), 
-                    gt_label_idx=gt_label_idx.to(self.device),
-                    cf_input_ids=cf_inputs["input_ids"].squeeze().to(self.device), 
-                    cf_attention_mask=cf_inputs["attention_mask"].squeeze().to(self.device), 
-                    cf_label_idx=cf_label_idx.to(self.device),
-                    target_input_ids=target_obj_inputs["input_ids"].squeeze().to(self.device), 
-                    target_attention_mask=target_obj_inputs["attention_mask"].squeeze().to(self.device),
-                )
 
-                logits_per_text = torch.matmul(text_embeds, image_embeds.detach().t().to(self.device)) * self.logit_scale
-                logits_per_true_text, logits_per_cf_text = logits_per_text[:bs], logits_per_text[bs:]
+                true_text_embeds, cf_text_embeds = self.text_model(
+                    gt_input_ids=gt_inputs["input_ids"].squeeze().to(self.device),
+                    true_attention_mask=gt_inputs["attention_mask"].squeeze().to(self.device),
+                    gt_label_idx=gt_label_idx.unsqueeze(-1).to(self.device),
+
+                    cf_input_ids=cf_inputs["input_ids"].squeeze().view(bs*num_cf,-1).to(self.device),
+                    cf_attention_mask=cf_inputs["attention_mask"].squeeze().view(bs*num_cf,-1).to(self.device),
+                    cf_label_idx=cf_label_idx.view(bs*num_cf,-1).to(self.device),
+
+                    target_input_ids=target_obj_inputs["input_ids"].squeeze().to(self.device),
+                    target_attention_mask=target_obj_inputs["attention_mask"].squeeze().to(self.device),
+                ) # (bz,dim), (bz,num_cf,dim)
+
+                logits_per_true_text = torch.matmul(true_text_embeds, image_embeds.detach().squeeze().t().to(self.device))\
+                    * self.logit_scale # (bz,bz)
+                # logits_per_cf_text = torch.matmul(cf_text_embeds, image_embeds.squeeze().detach().to(self.device).t()).view(bs,num_cf,-1).permute(1,0,2) * self.logit_scale # (num_cf,bz,bz)
+                logits_per_cf_text = torch.bmm(cf_text_embeds, image_embeds.detach().to(device).permute(0,2,1)).squeeze() * self.logit_scale # (bz,num_cf)
+
 
                 loss = self.count_loss(logits_per_true_text, logits_per_cf_text)
                 cumulative_train_loss += (loss.detach().item() * bs)
@@ -418,9 +386,9 @@ if __name__ == "__main__":
         # val_dataset = TextDatasetCustomDogs(args.eval_data_path, args.ref_obj, processor, clip_model, device, add_object_cf=args.add_object_cf,ref_obj_file=args.ref_obj_file)
         # val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
     elif args.ref_obj is None:
-        dataset = TextDatasetOnlineTrain(args.train_data_path,processor,num_classes=args.num_classes,ratio=args.train_ratio)
+        dataset = TextDatasetOnlineTrainContrastive(args.train_data_path,processor,num_classes=args.num_classes,ratio=args.train_ratio)
         dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-    val_dataset = TextDatasetOnlineTrain(args.eval_data_path, processor,num_classes=args.num_classes)
+    val_dataset = TextDatasetOnlineTrainContrastive(args.eval_data_path, processor,num_classes=args.num_classes)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
 
@@ -434,7 +402,9 @@ if __name__ == "__main__":
 
 
     if not args.not_log_wandb:
-        wandb.init(project="train_clip_count", config=args.__dict__, entity="ruisu")
+        wandb_config = args.__dict__
+        wandb_config["contrastive_loss"] = True
+        wandb.init(project="train_clip_count", config=wandb_config, entity="ruisu")
 
     trainer = Trainer(
         dataloader, 

@@ -4,7 +4,6 @@ from transformers import CLIPModel, CLIPProcessor
 import numpy as np
 import pandas as pd
 import torch
-from clip_count_utils import *
 import os
 from tqdm import tqdm
 from my_datasets import *
@@ -245,37 +244,72 @@ def img_clf(
         else:
             return torch.bmm(op1, op2)/torch.sum(op2 * op2, dim=1, keepdim=True)*op2.permute(0,2,1).repeat(1,args.num_classes,1)
 
+    def proj_2_helper_ablation(op1,op2,device):
+        """
+            op1: (bz, num_class, embed_dim)
+            op2: (bz, num_class, embed_dim)
+        """
+        dot_products = torch.sum(op1 * op2, dim=-1, keepdim=True) # (bz, num_class ,1)
+        op2_norm = torch.sum(op2 * op2, dim=-1, keepdim=True) # (bz, num_class, 1)
+
+        return dot_products/op2_norm*op2
+
+
     def merge_helper_orth_once(ref_diff):
-        ref_diff_projection_2 = proj_2_helper(ref_diff, target_embeds,args.disable_target_orth,device)
+        if args.ablation_proj_to_target_aug_embeds:
+            ref_diff_projection_2 = proj_2_helper_ablation(ref_diff,target_aug_embeds,device)
+        else:
+            ref_diff_projection_2 = proj_2_helper(ref_diff, target_embeds,args.disable_target_orth,device)
         ref_diff = ref_diff - ref_diff_projection_2 #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
 
         if args.use_only_number_word and args.normalize_number_word and ref_obj is not None:
             obj_ref_diff,obj_ref_prompt_single = get_ref_embed_helper(ref_obj)
             obj_ref_diff_projection = proj_1_helper(obj_ref_diff,obj_ref_prompt_single,args.disable_ref_orth,device)
-            obj_ref_diff_projection_2 = proj_2_helper(obj_ref_diff-obj_ref_diff_projection,target_embeds,args.disable_target_orth,device)
+            if args.ablation_proj_to_target_aug_embeds:
+                obj_ref_diff_projection_2 = proj_2_helper_ablation(obj_ref_diff-obj_ref_diff_projection,target_aug_embeds,device)
+            else:
+                obj_ref_diff_projection_2 = proj_2_helper(obj_ref_diff-obj_ref_diff_projection,target_embeds,args.disable_target_orth,device)
             obj_ref_diff = obj_ref_diff - obj_ref_diff_projection - obj_ref_diff_projection_2 #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
 
             ref_diff = ref_diff * obj_ref_diff.norm(p=2,dim=-1,keepdim=True) / ref_diff.norm(p=2,dim=-1,keepdim=True)
         
-        return apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
+        if args.ablation_add_to_target_embeds:
+            # print("target_embeds.shape",target_embeds.shape)
+            # print("ref_diff.shape",ref_diff.shape)
+            return apply_reff_diff(target_embeds,target_embeds.permute(0,2,1),ref_diff,args.factor,linear_shift,start_with_target_with_num)
+        else:
+            return apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
     
 
     def merge_helper_multi(ref_diff_list,ref_prompt_single_list,semantic_similarity_list):
         orth_ref_diff = 0
         for ref_diff, ref_prompt_single,semantic_similarity in zip(ref_diff_list,ref_prompt_single_list,semantic_similarity_list):
             ref_diff_projection = proj_1_helper(ref_diff,ref_prompt_single,args.disable_ref_orth,device)
-            ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds,args.disable_target_orth,device)
+            if args.ablation_proj_to_target_aug_embeds:
+                ref_diff_projection_2 = proj_2_helper_ablation(ref_diff-ref_diff_projection,target_aug_embeds,device)
+            else:
+                ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds,args.disable_target_orth,device)
             orth_ref_diff += (ref_diff - ref_diff_projection - ref_diff_projection_2)*semantic_similarity.view(batch_size,1,1)#+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
             del ref_diff,ref_prompt_single,ref_diff_projection,ref_diff_projection_2
-        return apply_reff_diff(target_embeds,target_aug_embeds,orth_ref_diff/len(ref_obj),args.factor,linear_shift,start_with_target_with_num)
+        if args.ablation_add_to_target_embeds:
+            return apply_reff_diff(target_embeds,target_embeds.permute(0,2,1),orth_ref_diff/len(ref_obj),args.factor,linear_shift,start_with_target_with_num)
+        else:
+            return apply_reff_diff(target_embeds,target_aug_embeds,orth_ref_diff/len(ref_obj),args.factor,linear_shift,start_with_target_with_num)
     
                 
     def merge_helper_orth_twice(ref_diff,ref_prompt_single,semantic_similarity):
         ref_diff_projection = proj_1_helper(ref_diff,ref_prompt_single,args.disable_ref_orth,device)
-        ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds,args.disable_target_orth,device)
+        if args.ablation_proj_to_target_aug_embeds:
+            ref_diff_projection_2 = proj_2_helper_ablation(ref_diff-ref_diff_projection,target_aug_embeds,device)
+        else:
+            ref_diff_projection_2 = proj_2_helper(ref_diff-ref_diff_projection, target_embeds,args.disable_target_orth,device)
 
         ref_diff = (ref_diff - ref_diff_projection - ref_diff_projection_2) * semantic_similarity.view(batch_size,1,1) #+ (1-args.factor) * (tar_diff - tar_diff_projection - tar_diff_aligned)
-        return apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
+        
+        if args.ablation_add_to_target_embeds:
+            return apply_reff_diff(target_embeds,target_embeds.permute(0,2,1),ref_diff,args.factor,linear_shift,start_with_target_with_num)
+        else:
+            return apply_reff_diff(target_embeds,target_aug_embeds,ref_diff,args.factor,linear_shift,start_with_target_with_num)
 
 
     configs = args.__dict__
