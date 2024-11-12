@@ -65,6 +65,21 @@ def project_tensor_B_onto_A(A, B):
 
     return proj_B_on_A
 
+# def get_prompt_embeds(model,input_ids,attention_mask,normalize=True):
+#     text_outputs = model.text_model(
+#                 input_ids=input_ids,
+#                 attention_mask=attention_mask,
+#                 position_ids=None,
+#                 output_attentions=model.config.output_attentions,
+#                 output_hidden_states=model.config.output_hidden_states,
+#                 return_dict=model.config.use_return_dict,
+#             )
+#     text_embeds = text_outputs[1] #torch.Size([9, 512])
+#     text_embeds = model.text_projection(text_embeds) #torch.Size([9, 512])
+#     if normalize:
+#         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
+#     return text_embeds
+
 def get_prompt_embeds(model,input_ids,attention_mask,normalize=True):
     text_outputs = model.text_model(
                 input_ids=input_ids,
@@ -74,8 +89,7 @@ def get_prompt_embeds(model,input_ids,attention_mask,normalize=True):
                 output_hidden_states=model.config.output_hidden_states,
                 return_dict=model.config.use_return_dict,
             )
-    text_embeds = text_outputs[1] #torch.Size([9, 512])
-    text_embeds = model.text_projection(text_embeds) #torch.Size([9, 512])
+    text_embeds = text_outputs.pooler_output
     if normalize:
         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
     return text_embeds
@@ -123,6 +137,19 @@ def apply_reff_diff(start,end,ref_diff,factor,linear_shift,start_with_target_wit
             raise NotImplementedError
         return merged_text_embeds
 
+# def get_image_embeds(model,pixel_values,device="cuda"):
+#     vision_outputs = model.vision_model(
+#             pixel_values=pixel_values.to(device),
+#             output_attentions=model.config.output_attentions,
+#             output_hidden_states=model.config.output_hidden_states,
+#             return_dict=model.config.use_return_dict,
+#         )
+#     image_embeds = vision_outputs[1]
+#     image_embeds = model.visual_projection(image_embeds)
+#     image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
+
+#     return image_embeds
+
 def get_image_embeds(model,pixel_values,device="cuda"):
     vision_outputs = model.vision_model(
             pixel_values=pixel_values.to(device),
@@ -130,8 +157,7 @@ def get_image_embeds(model,pixel_values,device="cuda"):
             output_hidden_states=model.config.output_hidden_states,
             return_dict=model.config.use_return_dict,
         )
-    image_embeds = vision_outputs[1]
-    image_embeds = model.visual_projection(image_embeds)
+    image_embeds = vision_outputs.pooler_output
     image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
 
     return image_embeds

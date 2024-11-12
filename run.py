@@ -4,6 +4,7 @@ from sd import reproduce_stable_diffusion_results
 from clip import *
 from data_aug import data_augmentation
 import wandb
+from transformers import AutoProcessor, AutoModel
 
 
 
@@ -79,8 +80,11 @@ if __name__ == "__main__":
         pretrained_model_name="CompVis/stable-diffusion-v1-4"
         reproduce_stable_diffusion_results(eval_dir,pretrained_model_name,device)
     elif "clip" in args.model:
-        model = CLIPModel.from_pretrained(args.model)
-        processor = CLIPProcessor.from_pretrained(args.model)
+        # model = CLIPModel.from_pretrained(args.model)
+        # processor = CLIPProcessor.from_pretrained(args.model)
+        model = AutoModel.from_pretrained(args.model)
+        processor = AutoProcessor.from_pretrained(args.model)
+
         number_shift_vectors=None
         # if args.load_trained_text_projection:
         #     print(f"Loading trained text projection from {args.trained_text_projection_path}")
