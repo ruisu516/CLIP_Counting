@@ -260,18 +260,22 @@ class CustomDataset(Dataset):
         self.data = []
         for number in range(2,6):
             for sample in data[number]:
-                pixel_values=processor(text=None, images=sample["img"], return_tensors="pt", padding=True)["pixel_values"] # torch.Size([1, 3, 224, 224])
-                image_embeds = get_image_embeds(
-                    model=model,
-                    pixel_values=pixel_values.to(device),
-                    device=device
-                ).detach().cpu()
-                self.data.append({
-                    "gt_count":number,
-                    "target_obj_text":target_obj,
-                    "target_obj_aug_text":[f"{number_word} {target_obj}" for number_word in number_words],
-                    "image_embeds":image_embeds,
-                }) 
+                try:
+                    pixel_values=processor(text=None, images=sample["img"], return_tensors="pt", padding=True)["pixel_values"] # torch.Size([1, 3, 224, 224])
+                    image_embeds = get_image_embeds(
+                        model=model,
+                        pixel_values=pixel_values.to(device),
+                        device=device
+                    ).detach().cpu()
+                    self.data.append({
+                        "gt_count":number,
+                        "target_obj_text":target_obj,
+                        "target_obj_aug_text":[f"{number_word} {target_obj}" for number_word in number_words],
+                        "image_embeds":image_embeds,
+                    }) 
+                except:
+                    pass
+        print("========len(self.data)",len(self.data))
 
     
     def __len__(self):

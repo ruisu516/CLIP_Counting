@@ -199,6 +199,8 @@ def img_clf(
     processor,
     args,
     number_shift_vectors=None,
+    prefix_embedding=None,
+    prefix_length=None,
     target_obj=None,
     ref_obj=None,
     normalize=False,
@@ -388,15 +390,20 @@ def img_clf(
         target_obj_aug_with_context_text = [item for tuple_ in target_obj_aug_with_context_text for item in tuple_]
         target_obj_aug_text = [item for tuple_ in target_obj_aug_text for item in tuple_]
 
-        target_embeds = text2embedding(
-            target_obj_with_context_text if args.use_target_obj_with_context else target_obj_text,
-            model,processor,device,normalize
-        )[...,None]
+        
+        if prefix_embedding is None:
+            target_embeds = text2embedding(
+                target_obj_with_context_text if args.use_target_obj_with_context else target_obj_text,
+                model,processor,device,normalize
+            )[...,None]
 
-        target_aug_embeds = text2embedding(
-            target_obj_aug_with_context_text if use_target_aug_sent_with_context else target_obj_aug_text,
-            model,processor,device,normalize
-        )[np.arange(batch_size * args.num_classes).reshape(args.num_classes,batch_size).T.flatten()].reshape(batch_size, args.num_classes, -1)
+            target_aug_embeds = text2embedding(
+                target_obj_aug_with_context_text if use_target_aug_sent_with_context else target_obj_aug_text,
+                model,processor,device,normalize
+            )[np.arange(batch_size * args.num_classes).reshape(args.num_classes,batch_size).T.flatten()].reshape(batch_size, args.num_classes, -1)
+        else:
+            target_aug_embeds = text2embedding_with_prefix_embedding(target_obj_aug_with_context_text if use_target_aug_sent_with_context else target_obj_aug_text,model,processor,prefix_embedding,prefix_length,device,normalize)
+        
         
         if ref_obj is not None:
             

@@ -4,7 +4,7 @@ from sd import reproduce_stable_diffusion_results
 from clip import *
 from data_aug import data_augmentation
 import wandb
-from transformers import AutoProcessor, AutoModel
+from transformers import AutoProcessor, AutoModel, BlipModel
 
 
 
@@ -20,7 +20,8 @@ if __name__ == "__main__":
     parser.add_argument("--processed_countbench_data_path",type=str,help="path to custom data")
     parser.add_argument("--task",type=str,choices=["classification","image_retrievel","image_gen"],help="choose the task")
     
-    parser.add_argument("--model",type=str,choices=["openai/clip-vit-base-patch32","openai/clip-vit-base-patch16","openai/clip-vit-large-patch14","stable_diffusion"],help="choose the model")
+    parser.add_argument("--model",type=str,help="choose the model")
+    # parser.add_argument("--model",type=str,choices=["openai/clip-vit-base-patch32","openai/clip-vit-base-patch16","openai/clip-vit-large-patch14","stable_diffusion"],help="choose the model")
     # parser.add_argument("--trained_text_projection_path",default="",type=str)   
     parser.add_argument("--trained_clip_path",default="",type=str)   
     
@@ -52,6 +53,9 @@ if __name__ == "__main__":
     parser.add_argument('--ablation_proj_to_target_aug_embeds', action='store_true')
     parser.add_argument('--ablation_add_to_target_embeds', action='store_true')
 
+    parser.add_argument('--prefix_tunning', action='store_true')
+    parser.add_argument("--prefix_length", type=int, default=1)
+
 
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -79,13 +83,20 @@ if __name__ == "__main__":
     if args.task == "image_gen" and args.model == "stable_diffusion":
         pretrained_model_name="CompVis/stable-diffusion-v1-4"
         reproduce_stable_diffusion_results(eval_dir,pretrained_model_name,device)
-    elif "clip" in args.model:
-        # model = CLIPModel.from_pretrained(args.model)
-        # processor = CLIPProcessor.from_pretrained(args.model)
-        model = AutoModel.from_pretrained(args.model)
-        processor = AutoProcessor.from_pretrained(args.model)
+    elif "clip" in args.model or "siglip" in args.model or "blip" in args.model:
+        if "clip" in args.model:
+            model = CLIPModel.from_pretrained(args.model)
+            processor = CLIPProcessor.from_pretrained(args.model)
+        elif "siglip" in args.model:
+            model = AutoModel.from_pretrained(args.model)
+            processor = AutoProcessor.from_pretrained(args.model)
+        elif "blip" in args.model:
+            model = BlipModel.from_pretrained(args.model)
+            processor = AutoProcessor.from_pretrained(args.model)
+
 
         number_shift_vectors=None
+        prefix_embedding=None
         # if args.load_trained_text_projection:
         #     print(f"Loading trained text projection from {args.trained_text_projection_path}")
         #     model.text_projection.load_state_dict(torch.load(args.trained_text_projection_path))
@@ -94,6 +105,9 @@ if __name__ == "__main__":
             if "number_shift_vectors" in model_dict.keys():
                 number_shift_vectors = model_dict["number_shift_vectors"]
                 del model_dict["number_shift_vectors"]
+            if args.prefix_tunning and "prefix_embedding" in model_dict.keys():
+                prefix_embedding = model_dict["prefix_embedding"]
+                del model_dict["prefix_embedding"]
             for key in list(model_dict.keys()):
                 if "clip_text_model." in key:
                     model_dict[key.replace("clip_text_model.","")] = model_dict[key]
@@ -134,6 +148,8 @@ if __name__ == "__main__":
                         args=args,
                         target_obj=target_obj,
                         number_shift_vectors=number_shift_vectors,
+                        prefix_embedding=prefix_embedding,
+                        prefix_length=args.prefix_length,
                         ref_obj=ref_obj,
                         device=device,
                     )
@@ -174,6 +190,8 @@ if __name__ == "__main__":
                     processor=processor,
                     args=args,
                     number_shift_vectors=number_shift_vectors,
+                    prefix_embedding=prefix_embedding,
+                    prefix_length=args.prefix_length,
                     ref_obj=ref_obj,
                     device=device,
             )
@@ -185,6 +203,8 @@ if __name__ == "__main__":
                     processor=processor,
                     args=args,
                     number_shift_vectors=number_shift_vectors,
+                    prefix_embedding=prefix_embedding,
+                    prefix_length=args.prefix_length,
                     ref_obj=ref_obj,
                     device=device,
             )

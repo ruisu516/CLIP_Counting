@@ -11,13 +11,16 @@ import torch.nn as nn
 from transformers import CLIPTextModel
 import wandb
 import numpy as np
+from modeling_attn_mask_utils import _create_4d_causal_attention_mask, _prepare_4d_attention_mask
 
 class CustomCLIPModel(nn.Module):
-    def __init__(self, clip_config, clip_text_model, clip_text_projection,number_shift_vectors=None,orthogonalize=True,ablation_proj_to_target_aug_embeds=False,ablation_add_to_target_embeds=False):
+    def __init__(self, clip_config, clip_text_model, clip_text_projection,number_shift_vectors=None,prefix_embedding=None,prefix_length=None,orthogonalize=True,ablation_proj_to_target_aug_embeds=False,ablation_add_to_target_embeds=False):
         super(CustomCLIPModel, self).__init__()
         self.clip_text_model = clip_text_model
         self.clip_text_projection = clip_text_projection
         self.number_shift_vectors = number_shift_vectors
+        self.prefix_embedding = prefix_embedding
+        self.prefix_length = prefix_length
         self.orthogonalize = orthogonalize
         self.clip_config = clip_config
         self.ablation_proj_to_target_aug_embeds = ablation_proj_to_target_aug_embeds
@@ -39,71 +42,135 @@ class CustomCLIPModel(nn.Module):
     ):
 
         assert cf_label_idx.shape == gt_label_idx.shape
-        true_text_embeds = self.clip_text_projection(
-            self.clip_text_model(
-                input_ids=gt_input_ids,
-                attention_mask=true_attention_mask,
-                position_ids=None,
-                output_attentions=self.clip_config.output_attentions,
-                output_hidden_states=self.clip_config.output_hidden_states,
-                return_dict=self.clip_config.use_return_dict,
-            )[1]
-        )#(bz,dim)
-        cf_text_embeds = self.clip_text_projection(
-            self.clip_text_model(
-                input_ids=cf_input_ids,
-                attention_mask=cf_attention_mask,
-                position_ids=None,
-                output_attentions=self.clip_config.output_attentions,
-                output_hidden_states=self.clip_config.output_hidden_states,
-                return_dict=self.clip_config.use_return_dict,
-            )[1]
-        ) #(bz,dim)
+        cf_label_idx,gt_label_idx = cf_label_idx.unsqueeze(-1), gt_label_idx.unsqueeze(-1)
+        cf_batch_indices = torch.arange(gt_input_ids.shape[0]).unsqueeze(1).expand_as(cf_label_idx)
 
-        if self.number_shift_vectors is not None:
-            target_embeds = self.clip_text_projection(
-                        self.clip_text_model(
-                            input_ids=target_input_ids,
-                            attention_mask=target_attention_mask,
-                            position_ids=None,
-                            output_attentions=self.clip_config.output_attentions,
-                            output_hidden_states=self.clip_config.output_hidden_states,
-                            return_dict=self.clip_config.use_return_dict,
-                        )[1]
-                    ) # (bz, dim)
-            
-            if self.orthogonalize:
-                if self.ablation_proj_to_target_aug_embeds:
-                    gt_projection = self.projection_helper(true_text_embeds,self.number_shift_vectors)
-                    gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - gt_projection #(bz,num_classes,dim)
-                    cf_projection = self.projection_helper(cf_text_embeds,self.number_shift_vectors)
-                    cf_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - cf_projection #(bz,num_classes,dim)
-                
+        if self.prefix_embedding is not None:
+            def _prefix_forward(input_ids,label_idx):
+                input_shape = input_ids.size()
+                input_ids = input_ids.view(-1, input_shape[-1])
+
+                hidden_states = self.clip_text_model.embeddings(input_ids=input_ids, position_ids=None)
+
+                # expanded_prefix = self.prefix_embedding.unsqueeze(0).expand(input_shape[0], -1, -1)
+                # expanded_prefix = self.prefix_embedding[cf_batch_indices,gt_label_idx].squeeze()
+                expanded_prefix = self.prefix_embedding[label_idx].squeeze()
+                # print("label_idx.shape",label_idx.shape)
+                # print("expanded_prefix.shape",expanded_prefix.shape)
+                # print("hidden_states.shape",hidden_states.shape)
+
+                hidden_states = torch.cat([expanded_prefix, hidden_states], dim=1)
+
+                # CLIP's text model uses causal mask, prepare it here.
+                # https://github.com/openai/CLIP/blob/cfcffb90e69f37bf2ff1e988237a0fbe41f33c04/clip/model.py#L324
+                extended_input_shape = (input_shape[0], input_shape[1] + self.prefix_length)  # (batch_size, prefix + sequence_length)
+                causal_attention_mask = _create_4d_causal_attention_mask(
+                    extended_input_shape, hidden_states.dtype, device=device
+                )
+
+
+                encoder_outputs = self.clip_text_model.encoder(
+                    inputs_embeds=hidden_states,
+                    attention_mask=None,
+                    causal_attention_mask=causal_attention_mask,
+                    output_attentions=self.clip_text_model.config.output_attentions,
+                    output_hidden_states=self.clip_text_model.config.output_hidden_states,
+                    return_dict=self.clip_text_model.config.use_return_dict,
+                )
+
+
+                last_hidden_state = self.clip_text_model.final_layer_norm(encoder_outputs[0])
+
+                if self.clip_text_model.eos_token_id == 2:
+                    # The `eos_token_id` was incorrect before PR #24773: Let's keep what have been done here.
+                    # A CLIP model with such `eos_token_id` in the config can't work correctly with extra new tokens added
+                    # ------------------------------------------------------------
+                    # text_embeds.shape = [batch_size, sequence_length, transformer.width]
+                    # take features from the eot embedding (eot_token is the highest number in each sequence)
+                    # casting to torch.int for onnx compatibility: argmax doesn't support int64 inputs with opset 14
+                    pooled_output = last_hidden_state[
+                        torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device),
+                        input_ids.to(dtype=torch.int, device=last_hidden_state.device).argmax(dim=-1),
+                    ]
                 else:
-                    #projection (num_classes,bz, dim)
-                    projection = self.projection_helper(target_embeds,self.number_shift_vectors)
-                    gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - projection #(bz,num_classes,dim)
-                    cf_number_shift_vectors = gt_number_shift_vectors
-            else:
-                gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0).repeat(true_text_embeds.shape[0],1,1) #(bz,num_classes,dim)
-                cf_number_shift_vectors = gt_number_shift_vectors
+                    # The config gets updated `eos_token_id` from PR #24773 (so the use of exta new tokens is possible)
+                    pooled_output = last_hidden_state[
+                        torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device),
+                        # We need to get the first position of `eos_token_id` value (`pad_token_ids` might equal to `eos_token_id`)
+                        # Note: we assume each sequence (along batch dim.) contains an  `eos_token_id` (e.g. prepared by the tokenizer)
+                        (input_ids.to(dtype=torch.int, device=last_hidden_state.device) == self.clip_text_model.eos_token_id)
+                        .int()
+                        .argmax(dim=-1),
+                    ]
+                return pooled_output
             
-            
-            
-            cf_label_idx,gt_label_idx = cf_label_idx.unsqueeze(-1),gt_label_idx.unsqueeze(-1)
-            cf_batch_indices = torch.arange(true_text_embeds.shape[0]).unsqueeze(1).expand_as(cf_label_idx)
-            # print(cf_batch_indices.shape,number_shift_vectors.shape,gt_label_idx.shape)
-            # print(number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze().shape,true_text_embeds.shape)
-            if self.ablation_add_to_target_embeds:
-                true_text_embeds = target_embeds + gt_number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze()
-                cf_text_embeds = target_embeds + cf_number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
-            else:
-                true_text_embeds = true_text_embeds + gt_number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze()
-                cf_text_embeds = cf_text_embeds + cf_number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
-            # true_text_embeds = true_text_embeds + number_shift_vectors[gt_label_idx]
-            # cf_text_embeds = cf_text_embeds + number_shift_vectors[cf_label_idx]
+            true_text_embeds = self.clip_text_projection(_prefix_forward(gt_input_ids,gt_label_idx))
+            cf_text_embeds = self.clip_text_projection(_prefix_forward(cf_input_ids,cf_label_idx))  
 
+        else:
+            true_text_embeds = self.clip_text_projection(
+                self.clip_text_model(
+                    input_ids=gt_input_ids,
+                    attention_mask=true_attention_mask,
+                    position_ids=None,
+                    output_attentions=self.clip_config.output_attentions,
+                    output_hidden_states=self.clip_config.output_hidden_states,
+                    return_dict=self.clip_config.use_return_dict,
+                )[1]
+            )#(bz,dim)
+            cf_text_embeds = self.clip_text_projection(
+                self.clip_text_model(
+                    input_ids=cf_input_ids,
+                    attention_mask=cf_attention_mask,
+                    position_ids=None,
+                    output_attentions=self.clip_config.output_attentions,
+                    output_hidden_states=self.clip_config.output_hidden_states,
+                    return_dict=self.clip_config.use_return_dict,
+                )[1]
+            ) #(bz,dim)
+
+            if self.number_shift_vectors is not None:
+                target_embeds = self.clip_text_projection(
+                            self.clip_text_model(
+                                input_ids=target_input_ids,
+                                attention_mask=target_attention_mask,
+                                position_ids=None,
+                                output_attentions=self.clip_config.output_attentions,
+                                output_hidden_states=self.clip_config.output_hidden_states,
+                                return_dict=self.clip_config.use_return_dict,
+                            )[1]
+                        ) # (bz, dim)
                 
+                if self.orthogonalize:
+                    if self.ablation_proj_to_target_aug_embeds:
+                        gt_projection = self.projection_helper(true_text_embeds,self.number_shift_vectors)
+                        gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - gt_projection #(bz,num_classes,dim)
+                        cf_projection = self.projection_helper(cf_text_embeds,self.number_shift_vectors)
+                        cf_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - cf_projection #(bz,num_classes,dim)
+                    
+                    else:
+                        #projection (num_classes,bz, dim)
+                        projection = self.projection_helper(target_embeds,self.number_shift_vectors)
+                        gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0) - projection #(bz,num_classes,dim)
+                        cf_number_shift_vectors = gt_number_shift_vectors
+                else:
+                    gt_number_shift_vectors = self.number_shift_vectors.unsqueeze(0).repeat(true_text_embeds.shape[0],1,1) #(bz,num_classes,dim)
+                    cf_number_shift_vectors = gt_number_shift_vectors
+                
+                
+                
+                # print(cf_batch_indices.shape,number_shift_vectors.shape,gt_label_idx.shape)
+                # print(number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze().shape,true_text_embeds.shape)
+                if self.ablation_add_to_target_embeds:
+                    true_text_embeds = target_embeds + gt_number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze()
+                    cf_text_embeds = target_embeds + cf_number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
+                else:
+                    true_text_embeds = true_text_embeds + gt_number_shift_vectors[cf_batch_indices,gt_label_idx].squeeze()
+                    cf_text_embeds = cf_text_embeds + cf_number_shift_vectors[cf_batch_indices,cf_label_idx].squeeze()
+                # true_text_embeds = true_text_embeds + number_shift_vectors[gt_label_idx]
+                # cf_text_embeds = cf_text_embeds + number_shift_vectors[cf_label_idx]
+
+                    
         text_embeds = torch.concat([true_text_embeds, cf_text_embeds], dim=0) # (2*bz,dim)
         return text_embeds / torch.norm(text_embeds, p=2, dim=-1, keepdim=True)
 
@@ -176,6 +243,8 @@ class Trainer:
         self.args = args
         self.logit_scale = logit_scale
         self.train_number_shift_vectors = args.train_number_shift_vectors
+        self.prefix_tunning = args.prefix_tunning
+        self.prefix_length = args.prefix_length
         self.clip_config = clip_model.config
         self.device=device
                
@@ -203,8 +272,14 @@ class Trainer:
             trainable_parameters.append(number_shift_vectors)
         else:
             number_shift_vectors = None
+        if self.prefix_tunning:
+            prefix_embedding = torch.nn.Parameter(torch.randn(args.num_classes, args.prefix_length, self.clip_config.text_config.hidden_size).to(device))
+            trainable_parameters.append(prefix_embedding)
+        else:
+            prefix_embedding = None
+        
         self.text_model = CustomCLIPModel(self.clip_config,clip_model.text_model.to(device), clip_model.text_projection.to(device), \
-                                          number_shift_vectors,args.orthogonalize,\
+                                          number_shift_vectors,prefix_embedding,args.prefix_length,args.orthogonalize,\
                                             ablation_proj_to_target_aug_embeds=self.args.ablation_proj_to_target_aug_embeds,\
                                                 ablation_add_to_target_embeds=self.args.ablation_add_to_target_embeds)
 
@@ -398,7 +473,9 @@ if __name__ == "__main__":
     parser.add_argument('--ablation_proj_to_target_aug_embeds', action='store_true')
     parser.add_argument('--ablation_add_to_target_embeds', action='store_true')
 
-    
+    parser.add_argument('--prefix_tunning', action='store_true')
+    parser.add_argument("--prefix_length", type=int, default=1)
+
 
     args = parser.parse_args()
     args.num_epochs = int(args.num_epochs/args.train_ratio)
@@ -429,8 +506,9 @@ if __name__ == "__main__":
     
     print("trainable_parameters",args.trainable_parameters)
     trained_param_save_name = "_".join(args.trainable_parameters)
-    model_save_path = f"{args.save_root_folder}/{args.model.split('/')[1]}_{trained_param_save_name}{args.train_number_shift_vectors}{args.orthogonalize}{args.ablation_proj_to_target_aug_embeds}{args.ablation_add_to_target_embeds}_{args.lr}_{args.optimizer}{args.ref_obj}_{args.add_object_cf}{args.CLIP_loss}"
+    model_save_path = f"{args.save_root_folder}/{args.model.split('/')[1]}_{trained_param_save_name}{args.train_number_shift_vectors}{args.orthogonalize}{args.ablation_proj_to_target_aug_embeds}{args.ablation_add_to_target_embeds}_{args.prefix_tunning}{args.prefix_length}_{args.lr}_{args.optimizer}{args.ref_obj}_{args.add_object_cf}{args.CLIP_loss}"
     os.makedirs(model_save_path, exist_ok=True)
+    print("@@@@@@@@@@@@@@@@@@@@save_path:",model_save_path)
 
 
     if not args.not_log_wandb:

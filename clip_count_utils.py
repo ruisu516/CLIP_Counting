@@ -4,6 +4,7 @@ from PIL import Image
 import requests
 from tqdm import tqdm
 from requests.exceptions import Timeout
+from modeling_attn_mask_utils import _create_4d_causal_attention_mask, _prepare_4d_attention_mask
 
 spacy_nlp = spacy.load("en_core_web_sm")
 
@@ -65,21 +66,6 @@ def project_tensor_B_onto_A(A, B):
 
     return proj_B_on_A
 
-# def get_prompt_embeds(model,input_ids,attention_mask,normalize=True):
-#     text_outputs = model.text_model(
-#                 input_ids=input_ids,
-#                 attention_mask=attention_mask,
-#                 position_ids=None,
-#                 output_attentions=model.config.output_attentions,
-#                 output_hidden_states=model.config.output_hidden_states,
-#                 return_dict=model.config.use_return_dict,
-#             )
-#     text_embeds = text_outputs[1] #torch.Size([9, 512])
-#     text_embeds = model.text_projection(text_embeds) #torch.Size([9, 512])
-#     if normalize:
-#         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
-#     return text_embeds
-
 def get_prompt_embeds(model,input_ids,attention_mask,normalize=True):
     text_outputs = model.text_model(
                 input_ids=input_ids,
@@ -89,7 +75,9 @@ def get_prompt_embeds(model,input_ids,attention_mask,normalize=True):
                 output_hidden_states=model.config.output_hidden_states,
                 return_dict=model.config.use_return_dict,
             )
-    text_embeds = text_outputs.pooler_output
+    text_embeds = text_outputs[1] #torch.Size([9, 512])
+    if hasattr(model, "text_projection"):
+        text_embeds = model.text_projection(text_embeds) #torch.Size([9, 512])
     if normalize:
         text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
     return text_embeds
@@ -99,14 +87,80 @@ def text2embedding(text,model,processor,device,normalize):
     if inputs["input_ids"].shape[1] > 77:
         last_id = inputs["input_ids"][:,[-1]]
         inputs["input_ids"] = torch.concat([inputs["input_ids"][:,:76],last_id],dim=1)
-        last_mask = inputs["attention_mask"][:,[-1]]
-        inputs["attention_mask"] = torch.concat([inputs["attention_mask"][:,:76],last_mask],dim=1)
+        # last_mask = inputs["attention_mask"][:,[-1]]
+        # inputs["attention_mask"] = torch.concat([inputs["attention_mask"][:,:76],last_mask],dim=1)
     return get_prompt_embeds(
         model=model,
         input_ids=inputs["input_ids"].to(device),
-        attention_mask=inputs["attention_mask"].to(device),
+        attention_mask=None, #inputs["attention_mask"].to(device),
         normalize=normalize,
     )# torch.Size([k, 512])
+
+def text2embedding_with_prefix_embedding(text,model,processor,prefix_embedding,prefix_length,device,normalize):
+    def _prefix_forward():
+        input_shape = input_ids.size()
+        input_ids = input_ids.view(-1, input_shape[-1])
+
+        hidden_states = model.text_model.embeddings(input_ids=input_ids, position_ids=None)
+
+        # expanded_prefix = prefix_embedding.unsqueeze(0).expand(input_shape[0], -1, -1)
+        print("prefix_embedding.shape",prefix_embedding.shape)
+        print("hidden_states.shape",prefix_embedding.shape)
+
+        hidden_states = torch.cat([prefix_embedding, hidden_states], dim=1)
+
+        # CLIP's text model uses causal mask, prepare it here.
+        # https://github.com/openai/CLIP/blob/cfcffb90e69f37bf2ff1e988237a0fbe41f33c04/clip/model.py#L324
+        extended_input_shape = (input_shape[0], input_shape[1] + prefix_length)  # (batch_size, prefix + sequence_length)
+        causal_attention_mask = _create_4d_causal_attention_mask(
+            extended_input_shape, hidden_states.dtype, device=device
+        )
+
+
+        encoder_outputs = model.text_model.encoder(
+            inputs_embeds=hidden_states,
+            attention_mask=None,
+            causal_attention_mask=causal_attention_mask,
+            output_attentions=model.text_model.config.output_attentions,
+            output_hidden_states=model.text_model.config.output_hidden_states,
+            return_dict=model.text_model.config.use_return_dict,
+        )
+
+
+        last_hidden_state = model.text_model.final_layer_norm(encoder_outputs[0])
+
+        if model.text_model.eos_token_id == 2:
+            # The `eos_token_id` was incorrect before PR #24773: Let's keep what have been done here.
+            # A CLIP model with such `eos_token_id` in the config can't work correctly with extra new tokens added
+            # ------------------------------------------------------------
+            # text_embeds.shape = [batch_size, sequence_length, transformer.width]
+            # take features from the eot embedding (eot_token is the highest number in each sequence)
+            # casting to torch.int for onnx compatibility: argmax doesn't support int64 inputs with opset 14
+            pooled_output = last_hidden_state[
+                torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device),
+                input_ids.to(dtype=torch.int, device=last_hidden_state.device).argmax(dim=-1),
+            ]
+        else:
+            # The config gets updated `eos_token_id` from PR #24773 (so the use of exta new tokens is possible)
+            pooled_output = last_hidden_state[
+                torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device),
+                # We need to get the first position of `eos_token_id` value (`pad_token_ids` might equal to `eos_token_id`)
+                # Note: we assume each sequence (along batch dim.) contains an  `eos_token_id` (e.g. prepared by the tokenizer)
+                (input_ids.to(dtype=torch.int, device=last_hidden_state.device) == self.clip_text_model.eos_token_id)
+                .int()
+                .argmax(dim=-1),
+            ]
+        text_embeds = model.text_projection(pooled_output)
+        if normalize:
+            text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
+        return text_embeds
+    
+    inputs = processor(text=text, images=None, return_tensors="pt", padding=True)
+    if inputs["input_ids"].shape[1] > 77:
+        last_id = inputs["input_ids"][:,[-1]]
+        inputs["input_ids"] = torch.concat([inputs["input_ids"][:,:76],last_id],dim=1)    
+    
+    return _prefix_forward()# torch.Size([k, 512])
 
 def get_target_rep(target_object,target_aug_sentences,model,processor,device="cuda",normalize=True):
     target_object_prompt_embeds = text2embedding(target_object,model,processor,device,normalize)
@@ -137,19 +191,6 @@ def apply_reff_diff(start,end,ref_diff,factor,linear_shift,start_with_target_wit
             raise NotImplementedError
         return merged_text_embeds
 
-# def get_image_embeds(model,pixel_values,device="cuda"):
-#     vision_outputs = model.vision_model(
-#             pixel_values=pixel_values.to(device),
-#             output_attentions=model.config.output_attentions,
-#             output_hidden_states=model.config.output_hidden_states,
-#             return_dict=model.config.use_return_dict,
-#         )
-#     image_embeds = vision_outputs[1]
-#     image_embeds = model.visual_projection(image_embeds)
-#     image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
-
-#     return image_embeds
-
 def get_image_embeds(model,pixel_values,device="cuda"):
     vision_outputs = model.vision_model(
             pixel_values=pixel_values.to(device),
@@ -157,7 +198,9 @@ def get_image_embeds(model,pixel_values,device="cuda"):
             output_hidden_states=model.config.output_hidden_states,
             return_dict=model.config.use_return_dict,
         )
-    image_embeds = vision_outputs.pooler_output
+    image_embeds = vision_outputs[1]
+    if hasattr(model, "visual_projection"):
+        image_embeds = model.visual_projection(image_embeds)
     image_embeds = image_embeds / image_embeds.norm(p=2, dim=-1, keepdim=True)
 
     return image_embeds
